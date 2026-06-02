@@ -43,7 +43,8 @@ import "dotenv/config";
 import Stripe from "stripe";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY ?? "");
-const PORT = Number(process.env.PORT ?? 3000);
+const rawPort = process.env.PORT;
+const PORT = rawPort && !isNaN(Number(rawPort)) ? Number(rawPort) : 3000;
 
 function sendJson(response: import("node:http").ServerResponse, statusCode: number, body: unknown) {
   response.writeHead(statusCode, {
@@ -104,7 +105,7 @@ export default async function handler(
     return;
   }
 
-  const url = new URL(request.url, `http://localhost:${PORT}`);
+  const url = new URL(request.url, "http://localhost");
   const requestStart = performance.now();
   response.on("finish", () => {
     logInfo(
