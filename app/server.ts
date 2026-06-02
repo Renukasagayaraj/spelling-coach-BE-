@@ -39,6 +39,7 @@ import {
   pickNextWord,
 } from "./wordCatalog.js";
 import { logError, logInfo } from "./logging.js";
+import "dotenv/config";
 
 const PORT = Number(process.env.PORT ?? 3000);
 
@@ -348,7 +349,7 @@ export default async function handler(
     if (isAuthError(error)) {
       const statusCode =
         error instanceof Error &&
-        error.message.startsWith("Supabase auth is not configured.")
+          error.message.startsWith("Supabase auth is not configured.")
           ? 500
           : 401;
       sendJson(response, statusCode, {
