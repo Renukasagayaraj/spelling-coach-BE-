@@ -44,6 +44,14 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      - name: Run Database Migrations (Flyway)
+        run: |
+          chmod +x db/migrate.sh
+          ./db/migrate.sh migrate
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+
       - name: Install Vercel CLI
         run: npm install --global vercel@latest
 
