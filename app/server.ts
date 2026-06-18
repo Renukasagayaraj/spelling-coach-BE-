@@ -1,3 +1,4 @@
+import "dotenv/config";
 import * as Sentry from "@sentry/node";
 
 if (process.env.SENTRY_DSN) {
@@ -10,6 +11,7 @@ if (process.env.SENTRY_DSN) {
 import { createServer } from "node:http";
 import { URL } from "node:url";
 import { authenticateRequest } from "./auth.js";
+import { fetchUserProfileFromDB, saveUserProfileToDB } from "./supabase.js";
 import {
   buildSpellingCoachInput,
   buildWordPrecomputeInput,
@@ -191,8 +193,83 @@ export default async function handler(
     }
 
     if (request.method === "GET" && url.pathname === "/api/auth/me") {
-      const user = await authenticateRequest(request);
-      sendJson(response, 200, { user });
+      const authUser = await authenticateRequest(request);
+      const authHeader = request.headers.authorization || "";
+
+      let dbUser: any = null;
+      try {
+        dbUser = await fetchUserProfileFromDB(authHeader, authUser.id);
+        if (!dbUser) {
+          // If the profile does not exist, insert it on the fly
+          dbUser = await saveUserProfileToDB(authHeader, authUser.id, {
+            email: authUser.email
+          });
+        }
+      } catch (dbErr) {
+        logError("Failed to fetch/create user from DB:", dbErr);
+      }
+
+      const mergedUser = {
+        id: authUser.id,
+        email: authUser.email,
+        full_name: dbUser?.full_name || null,
+        child_id: dbUser?.child_id || null,
+        age: dbUser?.age || null,
+        grade: dbUser?.grade || null,
+        spelling_level: dbUser?.spelling_level || null,
+        theme_preference: dbUser?.theme_preference || 'default',
+        audio_enabled: dbUser?.audio_enabled !== false,
+      };
+
+      sendJson(response, 200, { user: mergedUser });
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/auth/profile") {
+      const authUser = await authenticateRequest(request);
+      const authHeader = request.headers.authorization || "";
+      const rawBody = await collectBody(request);
+      const profileData = JSON.parse(rawBody);
+
+      const allowedFields = [
+        "full_name",
+        "child_id",
+        "age",
+        "grade",
+        "spelling_level",
+        "theme_preference",
+        "audio_enabled"
+      ];
+
+      const profileUpdate: any = {};
+      for (const field of allowedFields) {
+        if (profileData[field] !== undefined) {
+          profileUpdate[field] = profileData[field];
+        }
+      }
+
+      let dbUser: any = null;
+      try {
+        dbUser = await saveUserProfileToDB(authHeader, authUser.id, profileUpdate);
+      } catch (dbErr) {
+        logError("Failed to update user profile in DB:", dbErr);
+        sendJson(response, 500, { error: "Failed to update user profile." });
+        return;
+      }
+
+      const mergedUser = {
+        id: authUser.id,
+        email: authUser.email,
+        full_name: dbUser?.full_name || null,
+        child_id: dbUser?.child_id || null,
+        age: dbUser?.age || null,
+        grade: dbUser?.grade || null,
+        spelling_level: dbUser?.spelling_level || null,
+        theme_preference: dbUser?.theme_preference || 'default',
+        audio_enabled: dbUser?.audio_enabled !== false,
+      };
+
+      sendJson(response, 200, { user: mergedUser });
       return;
     }
 
