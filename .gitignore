@@ -1,4 +1,5 @@
 node_modules/
+.venv-g2p/
 .DS_Store
 *.swp
 dist/

@@ -4,7 +4,12 @@ import {
   type SpellingCoachOutput,
 } from "./schemas.js";
 import { getReferenceHints } from "./referenceData.js";
-import { getWordByText, type SupportedLevel, type WordEntry } from "./wordCatalog.js";
+import {
+  getStoredWordBreakdown,
+  getWordByText,
+  type SupportedLevel,
+  type WordEntry,
+} from "./wordCatalog.js";
 
 export const CoachingRequestSchema = z
   .object({
@@ -186,6 +191,11 @@ function diffWords(targetWord: string, childAttempt: string) {
 }
 
 function detectLikelyChunks(word: WordEntry): string[] {
+  const storedBreakdown = getStoredWordBreakdown(word.word);
+  if (storedBreakdown?.displayChunks.length) {
+    return storedBreakdown.displayChunks;
+  }
+
   const hints = getReferenceHints({
     targetWord: word.word,
     childAttempt: word.word,
@@ -193,7 +203,7 @@ function detectLikelyChunks(word: WordEntry): string[] {
       childId: "system",
       age: 0,
       grade: "system",
-      spellingLevel: "system",
+      spellingLevel: word.level,
     },
     wordMetadata: {
       definition: word.definition,
@@ -354,6 +364,7 @@ export function buildSpellingCoachInput(
   const diff = diffWords(word.word, parsedRequest.childAttempt);
   const isCorrect =
     word.word.toLowerCase() === parsedRequest.childAttempt.toLowerCase();
+  const storedBreakdown = getStoredWordBreakdown(word.word);
 
   return {
     targetWord: word.word,
@@ -381,7 +392,7 @@ export function buildSpellingCoachInput(
     },
     structuralHints: {
       syllables: [],
-      likelyChunks: detectLikelyChunks(word),
+      likelyChunks: storedBreakdown?.displayChunks ?? detectLikelyChunks(word),
       detectedPatterns: [...word.patterns],
       likelyPrefix: detectLikelyPrefix(word),
       likelySuffix: detectLikelySuffix(word),
@@ -396,6 +407,8 @@ export function buildWordPrecomputeInput(targetWord: string): SpellingCoachInput
   if (!word) {
     throw new Error(`Unknown target word: ${targetWord}`);
   }
+
+  const storedBreakdown = getStoredWordBreakdown(word.word);
 
   return {
     targetWord: word.word,
@@ -425,7 +438,7 @@ export function buildWordPrecomputeInput(targetWord: string): SpellingCoachInput
     },
     structuralHints: {
       syllables: [],
-      likelyChunks: detectLikelyChunks(word),
+      likelyChunks: storedBreakdown?.displayChunks ?? detectLikelyChunks(word),
       detectedPatterns: [...word.patterns],
       likelyPrefix: detectLikelyPrefix(word),
       likelySuffix: detectLikelySuffix(word),

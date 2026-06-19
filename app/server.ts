@@ -1,17 +1,15 @@
 import "dotenv/config";
+import "./instrument.js";
 import * as Sentry from "@sentry/node";
-
-if (process.env.SENTRY_DSN) {
-  Sentry.init({
-    dsn: process.env.SENTRY_DSN,
-    sendDefaultPii: true,
-  });
-}
 
 import { createServer } from "node:http";
 import { URL } from "node:url";
 import { authenticateRequest } from "./auth.js";
-import { fetchUserProfileFromDB, saveUserProfileToDB } from "./supabase.js";
+import {
+  fetchCustomListsFromDB,
+  fetchCustomListByIdFromDB,
+  saveCustomListToDB,
+} from "./supabase.js";
 import {
   buildSpellingCoachInput,
   buildWordPrecomputeInput,
@@ -25,13 +23,16 @@ import {
   importForeignOriginWords,
 } from "./foreignOriginImport.js";
 import { getConfiguredModelName } from "./modelConfig.js";
+import { isNewDeterministicPatternMatcherEnabled } from "./newPatternMatcher.js";
 import { hasWordTeachingPrecompute, runSplitSpellingCoachAgent, warmWordTeachingPrecompute } from "./optimizedCoach.js";
 import { generatePronunciationAudio } from "./pronunciation.js";
+import { isNextStepEnabled, isRuntimeConceptTeachingEnabled } from "./prompt.js";
 import {
   isSpellingRulePromptHintsEnabled,
   isSpellingRuleShortlistEnabled,
 } from "./referenceData.js";
 import { runSpellingCoachAgent } from "./runAgent.js";
+import { recordSpellingCoachTrace, recordImportListTrace } from "./langfuse.js";
 import {
   getCustomWordListById,
   getForeignOriginWordListByOrigin,
@@ -41,12 +42,28 @@ import {
   pickNextWord,
 } from "./wordCatalog.js";
 import { logError, logInfo } from "./logging.js";
-import "dotenv/config";
+import {
+  buildVoiceResponse,
+  interpretVoiceUtterance,
+  transcribeAudio,
+  VoiceInterpretRequestSchema,
+  VoiceRespondRequestSchema,
+} from "./voice.js";
 import Stripe from "stripe";
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY ?? "");
-const rawPort = process.env.PORT;
-const PORT = rawPort && !isNaN(Number(rawPort)) ? Number(rawPort) : 3000;
+let stripeInstance: Stripe | null = null;
+function getStripe(): Stripe {
+  if (!stripeInstance) {
+    const key = process.env.STRIPE_SECRET_KEY;
+    if (!key) {
+      throw new Error("STRIPE_SECRET_KEY is not configured on the server.");
+    }
+    stripeInstance = new Stripe(key);
+  }
+  return stripeInstance;
+}
+
+const PORT = Number(process.env.PORT ?? 3000);
 
 function sendJson(response: import("node:http").ServerResponse, statusCode: number, body: unknown) {
   response.writeHead(statusCode, {
@@ -85,6 +102,19 @@ function collectBody(request: import("node:http").IncomingMessage): Promise<stri
   });
 }
 
+function collectBinaryBody(
+  request: import("node:http").IncomingMessage,
+): Promise<Uint8Array> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk) => {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    });
+    request.on("end", () => resolve(new Uint8Array(Buffer.concat(chunks))));
+    request.on("error", reject);
+  });
+}
+
 function isAuthError(error: unknown): boolean {
   return (
     error instanceof Error &&
@@ -107,7 +137,7 @@ export default async function handler(
     return;
   }
 
-  const url = new URL(request.url, "http://localhost");
+  const url = new URL(request.url, `http://localhost:${PORT}`);
   const requestStart = performance.now();
   response.on("finish", () => {
     logInfo(
@@ -131,6 +161,13 @@ export default async function handler(
       const spellingRulePromptHints = isSpellingRulePromptHintsEnabled()
         ? "on"
         : "off";
+      const newDeterministicPatternMatcher = isNewDeterministicPatternMatcherEnabled()
+        ? "on"
+        : "off";
+      const nextStep = isNextStepEnabled() ? "on" : "off";
+      const runtimeConceptTeaching = isRuntimeConceptTeachingEnabled()
+        ? "on"
+        : "off";
 
       sendJson(response, 200, {
         ok: true,
@@ -141,13 +178,23 @@ export default async function handler(
           ttsInstructions,
           spellingRuleShortlist,
           spellingRulePromptHints,
+          newDeterministicPatternMatcher,
+          nextStep,
+          runtimeConceptTeaching,
+        },
+        envConfigured: {
+          OPENAI_API_KEY: Boolean(process.env.OPENAI_API_KEY),
+          SENTRY_DSN: Boolean(process.env.SENTRY_DSN),
+          SUPABASE_URL: Boolean(process.env.SUPABASE_URL),
+          SUPABASE_PUBLISHABLE_KEY: Boolean(process.env.SUPABASE_PUBLISHABLE_KEY),
+          STRIPE_SECRET_KEY: Boolean(process.env.STRIPE_SECRET_KEY),
+          STRIPE_PRICE_ID: Boolean(process.env.STRIPE_PRICE_ID),
+          LANGFUSE_SECRET_KEY: Boolean(process.env.LANGFUSE_SECRET_KEY),
+          LANGFUSE_PUBLIC_KEY: Boolean(process.env.LANGFUSE_PUBLIC_KEY),
+          LANGFUSE_BASE_URL: Boolean(process.env.LANGFUSE_BASE_URL),
         },
       });
       return;
-    }
-
-    if (request.method === "GET" && url.pathname === "/api/debug-sentry") {
-      throw new Error("Triggering a test error in spelling-coach-BE!");
     }
 
     if (request.method === "GET" && url.pathname === "/api/words/next") {
@@ -157,121 +204,66 @@ export default async function handler(
         foreignOrigin: url.searchParams.get("foreignOrigin") ?? undefined,
         exclude: url.searchParams.get("exclude") ?? undefined,
       });
+      let customWordsFallback: any[] | undefined;
       const user = query.customListId
         ? await authenticateRequest(request)
         : undefined;
+
+      if (query.customListId && user) {
+        const authHeader = request.headers.authorization || "";
+        const dbList = await fetchCustomListByIdFromDB(authHeader, query.customListId, user.id);
+        if (dbList) {
+          customWordsFallback = dbList.words;
+        }
+      }
+
       const word = pickNextWord(
         query.level,
         query.exclude,
         query.customListId,
         query.foreignOrigin,
         user?.id,
+        customWordsFallback,
       );
-      if (word.level !== "1") {
-        const precomputeInput = buildWordPrecomputeInput(word.word);
-        const precomputeStart = performance.now();
-        void warmWordTeachingPrecompute(precomputeInput)
-          .then(() => {
-            logInfo(
-              `[spelling-coach precompute timing] word="${word.word}" total=${(performance.now() - precomputeStart).toFixed(1)}ms`,
-            );
-          })
-          .catch((error) => {
-            logError("Word teaching precompute failed:", error);
-          });
-      }
+      const precomputeInput = buildWordPrecomputeInput(word.word);
+      const precomputeStart = performance.now();
+      void warmWordTeachingPrecompute(precomputeInput)
+        .then(() => {
+          logInfo(
+            `[spelling-coach precompute timing] word="${word.word}" total=${(performance.now() - precomputeStart).toFixed(1)}ms`,
+          );
+        })
+        .catch((error) => {
+          logError("Word teaching precompute failed:", error);
+        });
       sendJson(response, 200, buildWordResponse(word));
       return;
     }
 
     if (request.method === "GET" && url.pathname === "/api/custom-lists") {
       const user = await authenticateRequest(request);
-      sendJson(response, 200, {
-        lists: listCustomWordListsForUser(user.id),
-      });
+      const authHeader = request.headers.authorization || "";
+      const lists = await fetchCustomListsFromDB(authHeader, user.id);
+      sendJson(response, 200, { lists });
       return;
     }
 
     if (request.method === "GET" && url.pathname === "/api/auth/me") {
-      const authUser = await authenticateRequest(request);
-      const authHeader = request.headers.authorization || "";
-
-      let dbUser: any = null;
-      try {
-        dbUser = await fetchUserProfileFromDB(authHeader, authUser.id);
-        if (!dbUser) {
-          // If the profile does not exist, insert it on the fly
-          dbUser = await saveUserProfileToDB(authHeader, authUser.id, {
-            email: authUser.email
-          });
-        }
-      } catch (dbErr) {
-        logError("Failed to fetch/create user from DB:", dbErr);
-      }
-
-      const mergedUser = {
-        id: authUser.id,
-        email: authUser.email,
-        full_name: dbUser?.full_name || null,
-        child_id: dbUser?.child_id || null,
-        age: dbUser?.age || null,
-        grade: dbUser?.grade || null,
-        spelling_level: dbUser?.spelling_level || null,
-        theme_preference: dbUser?.theme_preference || 'default',
-        audio_enabled: dbUser?.audio_enabled !== false,
-      };
-
-      sendJson(response, 200, { user: mergedUser });
+      const user = await authenticateRequest(request);
+      sendJson(response, 200, { user });
       return;
     }
 
-    if (request.method === "POST" && url.pathname === "/api/auth/profile") {
-      const authUser = await authenticateRequest(request);
-      const authHeader = request.headers.authorization || "";
-      const rawBody = await collectBody(request);
-      const profileData = JSON.parse(rawBody);
-
-      const allowedFields = [
-        "full_name",
-        "child_id",
-        "age",
-        "grade",
-        "spelling_level",
-        "theme_preference",
-        "audio_enabled"
-      ];
-
-      const profileUpdate: any = {};
-      for (const field of allowedFields) {
-        if (profileData[field] !== undefined) {
-          profileUpdate[field] = profileData[field];
-        }
-      }
-
-      let dbUser: any = null;
-      try {
-        dbUser = await saveUserProfileToDB(authHeader, authUser.id, profileUpdate);
-      } catch (dbErr) {
-        logError("Failed to update user profile in DB:", dbErr);
-        sendJson(response, 500, { error: "Failed to update user profile." });
-        return;
-      }
-
-      const mergedUser = {
-        id: authUser.id,
-        email: authUser.email,
-        full_name: dbUser?.full_name || null,
-        child_id: dbUser?.child_id || null,
-        age: dbUser?.age || null,
-        grade: dbUser?.grade || null,
-        spelling_level: dbUser?.spelling_level || null,
-        theme_preference: dbUser?.theme_preference || 'default',
-        audio_enabled: dbUser?.audio_enabled !== false,
-      };
-
-      sendJson(response, 200, { user: mergedUser });
+    if (request.method === "GET" && url.pathname === "/api/subscription/status") {
+      const user = await authenticateRequest(request);
+      sendJson(response, 200, {
+        subscribed: true,
+        currentPeriodEnd: Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60, // 30 days from now
+        cancelAtPeriodEnd: false,
+      });
       return;
     }
+
 
     if (request.method === "GET" && url.pathname === "/api/foreign-origins") {
       sendJson(response, 200, {
@@ -323,7 +315,8 @@ export default async function handler(
       }
 
       const user = await authenticateRequest(request);
-      const list = getCustomWordListById(listId, user.id);
+      const authHeader = request.headers.authorization || "";
+      const list = await fetchCustomListByIdFromDB(authHeader, listId, user.id);
       if (!list) {
         sendJson(response, 404, {
           error: `Unknown custom list: ${listId}`,
@@ -367,6 +360,60 @@ export default async function handler(
       return;
     }
 
+    if (request.method === "GET" && url.pathname === "/api/voice/capabilities") {
+      sendJson(response, 200, {
+        intents: [
+          "repeat_word",
+          "example_sentence",
+          "definition",
+          "origin",
+          "part_of_speech",
+          "spelling_attempt",
+        ],
+        spellingBehavior: {
+          shouldAutoSubmit: false,
+          micDuringPlayback: "disable",
+        },
+      });
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/audio/transcribe") {
+      const contentType = request.headers["content-type"] ?? "audio/webm";
+      const fileName = request.headers["x-audio-filename"];
+      const audio = await collectBinaryBody(request);
+      const text = await transcribeAudio(
+        audio,
+        Array.isArray(contentType) ? contentType[0] : contentType,
+        Array.isArray(fileName) ? fileName[0] : fileName ?? "voice.webm",
+      );
+      sendJson(response, 200, { text });
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/voice/interpret") {
+      const rawBody = await collectBody(request);
+      const requestBody = VoiceInterpretRequestSchema.parse(JSON.parse(rawBody));
+      const result = interpretVoiceUtterance(
+        requestBody.targetWord,
+        requestBody.utterance,
+      );
+      sendJson(response, 200, result);
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/voice/respond") {
+      const rawBody = await collectBody(request);
+      const requestBody = VoiceRespondRequestSchema.parse(JSON.parse(rawBody));
+      const result = await buildVoiceResponse(
+        requestBody.targetWord,
+        requestBody.utterance,
+        requestBody.includeAudio ?? true,
+      );
+      sendJson(response, 200, result);
+      return;
+    }
+
     if (
       request.method === "POST" &&
       url.pathname === "/api/spelling-coach/preview-input"
@@ -378,28 +425,77 @@ export default async function handler(
     }
 
     if (request.method === "POST" && url.pathname === "/api/spelling-coach") {
+      const startTime = Date.now();
       const rawBody = await collectBody(request);
       const requestBody = CoachingRequestSchema.parse(JSON.parse(rawBody));
       const coachInput = buildSpellingCoachInput(requestBody);
       const result = hasWordTeachingPrecompute(coachInput)
         ? await runSplitSpellingCoachAgent(coachInput)
         : await runSpellingCoachAgent(coachInput);
+
+      try {
+        await recordSpellingCoachTrace({
+          input: coachInput,
+          output: result,
+          latencyMs: Date.now() - startTime,
+        });
+      } catch (err) {
+        console.error("[LANGFUSE] Error in recordSpellingCoachTrace:", err);
+      }
       sendJson(response, 200, result);
       return;
     }
 
     if (request.method === "POST" && url.pathname === "/api/words/import-custom") {
+      const startTime = Date.now();
       const rawBody = await collectBody(request);
       const requestBody = CustomWordImportRequestSchema.parse(JSON.parse(rawBody));
       const user = await authenticateRequest(request);
+      const authHeader = request.headers.authorization || "";
+
+      let existingList: any = undefined;
+      if (requestBody.listId) {
+        const dbList = await fetchCustomListByIdFromDB(authHeader, requestBody.listId, user.id);
+        if (dbList) {
+          existingList = dbList;
+        }
+      }
+
       const result = await importCustomWords(requestBody, {
         ownerUserId: user.id,
+        existingList,
+        skipFileSave: true,
       });
+
+      const savedList = await saveCustomListToDB(
+        authHeader,
+        user.id,
+        requestBody.listName,
+        result.words,
+        requestBody.listId || result.list.id,
+      );
+
+      try {
+        await recordImportListTrace({
+          user,
+          listName: requestBody.listName,
+          wordCount: requestBody.words.length,
+          latencyMs: Date.now() - startTime,
+          inputWords: Array.isArray(requestBody.words) ? requestBody.words : [requestBody.words],
+          outputWords: savedList.words.map((word) => buildWordResponse(word)),
+        });
+      } catch (err) {
+        console.error("[LANGFUSE] Error in recordImportListTrace:", err);
+      }
       sendJson(response, 200, {
-        list: result.list,
+        list: {
+          id: savedList.id,
+          name: savedList.name,
+          wordCount: savedList.words.length,
+        },
         importedCount: result.importedCount,
         skippedExistingCount: result.skippedExistingCount,
-        words: result.words.map((word) => buildWordResponse(word)),
+        words: savedList.words.map((word) => buildWordResponse(word)),
       });
       return;
     }
@@ -437,11 +533,16 @@ export default async function handler(
       const successUrl = `${cleanReferer}?payment_success=true`;
       const cancelUrl = `${cleanReferer}?payment_cancelled=true`;
 
+      if (!process.env.STRIPE_SECRET_KEY) {
+        sendJson(response, 500, { error: "STRIPE_SECRET_KEY is not configured on the server." });
+        return;
+      }
       if (!process.env.STRIPE_PRICE_ID) {
         sendJson(response, 500, { error: "STRIPE_PRICE_ID is not configured on the server." });
         return;
       }
 
+      const stripe = getStripe();
       const session = await stripe.checkout.sessions.create({
         payment_method_types: ["card"],
         customer_email: user.email,
@@ -471,6 +572,12 @@ export default async function handler(
         return;
       }
 
+      if (!process.env.STRIPE_SECRET_KEY) {
+        sendJson(response, 500, { error: "STRIPE_SECRET_KEY is not configured on the server." });
+        return;
+      }
+
+      const stripe = getStripe();
       const customers = await stripe.customers.list({
         email: user.email,
         limit: 1,
@@ -511,6 +618,12 @@ export default async function handler(
         return;
       }
 
+      if (!process.env.STRIPE_SECRET_KEY) {
+        sendJson(response, 500, { error: "STRIPE_SECRET_KEY is not configured on the server." });
+        return;
+      }
+
+      const stripe = getStripe();
       const customers = await stripe.customers.list({
         email: user.email,
         limit: 1,
@@ -532,7 +645,6 @@ export default async function handler(
       sendJson(response, 200, { url: portalSession.url });
       return;
     }
-
     sendJson(response, 404, { error: "Not found." });
   } catch (error) {
     logError("Spelling coach API error:", error);

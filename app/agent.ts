@@ -2,7 +2,7 @@ import { SPELLING_COACH_SYSTEM_PROMPT } from "./prompt.js";
 import { DEFAULT_MODEL_NAME, getConfiguredModelName, getOpenAITemperature } from "./modelConfig.js";
 
 export type DeepAgentLike = {
-  invoke(input: unknown): Promise<unknown>;
+  invoke(input: unknown, options?: any): Promise<unknown>;
 };
 
 export type CreateSpellingCoachAgentOptions = {
@@ -102,7 +102,7 @@ async function createSpellingCoachAgentInternal(
   const create_deep_agent = await getCreateDeepAgent();
 
   return create_deep_agent({
-    model,
+    model: model as any,
     tools: [],
     subagents: [],
     instructions: `${SPELLING_COACH_SYSTEM_PROMPT}

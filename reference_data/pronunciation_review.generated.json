@@ -1,0 +1,32 @@
+{
+  "generatedAt": "2026-06-04T22:40:05.053Z",
+  "total": 4860,
+  "summary": {
+    "high": 4860,
+    "medium": 0,
+    "low": 0
+  },
+  "buckets": {
+    "awkward_glide_spellings": {
+      "count": 0,
+      "entries": []
+    },
+    "all_caps_single_lump": {
+      "count": 0,
+      "entries": []
+    },
+    "over_segmented_long_words": {
+      "count": 0,
+      "entries": []
+    },
+    "suspicious_oy_without_oi_oy": {
+      "count": 0,
+      "entries": []
+    },
+    "suspicious_eye_spellings": {
+      "count": 0,
+      "entries": []
+    }
+  },
+  "reviewList": []
+}

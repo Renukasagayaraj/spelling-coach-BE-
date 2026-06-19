@@ -80,15 +80,6 @@ export const ErrorRelevanceSchema = z.enum([
 
 export const WordTeachingSchema = z
   .object({
-    formTeaching: z
-      .object({
-        summary: z.string(),
-        patterns: z.array(z.string()),
-        chunks: z.array(z.string()),
-        chunkReason: z.string(),
-        sayAloudFocus: z.string(),
-      })
-      .strict(),
     conceptTeaching: z
       .object({
         summary: z.string(),
@@ -97,15 +88,27 @@ export const WordTeachingSchema = z
         morphologyFocus: z.string(),
         originLabels: z.array(z.string()),
         morphologyLabels: z.array(z.string()),
+        relatedForms: z.array(z.string()).default([]),
       })
       .strict(),
+  })
+  .strict();
+
+export const PatternMatchSchema = z
+  .object({
+    label: z.string(),
+    matchedText: z.string().optional(),
+    matchedParts: z.array(z.string()).optional(),
+    alternateMatchedParts: z.array(z.array(z.string())).optional(),
   })
   .strict();
 
 export const WordBreakdownSchema = z
   .object({
     displayChunks: z.array(z.string()),
+    alternateDisplayChunks: z.array(z.array(z.string())).default([]),
     chunkReason: z.string(),
+    matchedPatterns: z.array(PatternMatchSchema).default([]),
   })
   .strict();
 
@@ -177,6 +180,23 @@ export const WordTeachingPrecomputeSchema = z
   })
   .strict();
 
+export const WordTeachingOnlyPrecomputeSchema = z
+  .object({
+    wordTeaching: z
+      .object({
+        conceptTeaching: WordTeachingSchema.shape.conceptTeaching,
+      })
+      .strict(),
+    conceptLabels: ConceptLabelsSchema,
+  })
+  .strict();
+
+export const RelatedFormsOnlyPrecomputeSchema = z
+  .object({
+    relatedForms: z.array(z.string()).default([]),
+  })
+  .strict();
+
 export const MissOnlyOutputSchema = z
   .object({
     correctness: CorrectnessSchema,
@@ -216,8 +236,27 @@ export const SpellingCoachOutputSchema = z
   .strict();
 
 export type SpellingCoachInput = z.infer<typeof SpellingCoachInputSchema>;
-export type SpellingCoachOutput = z.infer<typeof SpellingCoachOutputSchema>;
-export type WordTeachingPrecompute = z.infer<typeof WordTeachingPrecomputeSchema>;
+export type WordBreakdown = z.input<typeof WordBreakdownSchema>;
+export type ParsedWordBreakdown = z.infer<typeof WordBreakdownSchema>;
+export type PatternMatch = z.infer<typeof PatternMatchSchema>;
+export type SpellingCoachOutput = Omit<
+  z.infer<typeof SpellingCoachOutputSchema>,
+  "wordBreakdown"
+> & {
+  wordBreakdown: WordBreakdown;
+};
+export type WordTeachingPrecompute = Omit<
+  z.infer<typeof WordTeachingPrecomputeSchema>,
+  "wordBreakdown"
+> & {
+  wordBreakdown: WordBreakdown;
+};
+export type WordTeachingOnlyPrecompute = z.infer<
+  typeof WordTeachingOnlyPrecomputeSchema
+>;
+export type RelatedFormsOnlyPrecompute = z.infer<
+  typeof RelatedFormsOnlyPrecomputeSchema
+>;
 export type MissOnlyOutput = z.infer<typeof MissOnlyOutputSchema>;
 export type DeterministicPatternFilterOutput = z.infer<
   typeof DeterministicPatternFilterOutputSchema
@@ -232,10 +271,28 @@ export function parseSpellingCoachOutput(output: unknown): SpellingCoachOutput {
   return SpellingCoachOutputSchema.parse(output);
 }
 
+export function parseRelatedFormsOnlyPrecompute(
+  output: unknown,
+): RelatedFormsOnlyPrecompute {
+  return RelatedFormsOnlyPrecomputeSchema.parse(output);
+}
+
 export function parseWordTeachingPrecompute(
   output: unknown,
 ): WordTeachingPrecompute {
   return WordTeachingPrecomputeSchema.parse(output);
+}
+
+export function parseWordTeachingOnlyPrecompute(
+  output: unknown,
+): WordTeachingOnlyPrecompute {
+  return WordTeachingOnlyPrecomputeSchema.parse(output);
+}
+
+export function parseWordBreakdown(
+  output: unknown,
+): ParsedWordBreakdown {
+  return WordBreakdownSchema.parse(output);
 }
 
 export function parseMissOnlyOutput(output: unknown): MissOnlyOutput {

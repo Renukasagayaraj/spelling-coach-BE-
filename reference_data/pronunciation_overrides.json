@@ -1,0 +1,105 @@
+[
+  {
+    "word": "bibliopegist",
+    "friendly_chunks": ["BI", "blee", "OP", "uh", "jist"],
+    "say_aloud_tip": "Say it slowly: BI-blee-OP-uh-jist",
+    "pronunciation_confidence": "high"
+  },
+  {
+    "word": "oeil",
+    "friendly_chunks": ["oyl"],
+    "say_aloud_tip": "Sounds like: oyl",
+    "pronunciation_confidence": "high"
+  },
+  {
+    "word": "skeuomorph",
+    "friendly_chunks": ["skyoo", "uh", "mawrf"],
+    "say_aloud_tip": "Say it slowly: skyoo-uh-mawrf",
+    "pronunciation_confidence": "high"
+  },
+  {
+    "word": "somatotype",
+    "friendly_chunks": ["soh", "MAT", "uh", "type"],
+    "say_aloud_tip": "Say it slowly: soh-MAT-uh-type",
+    "pronunciation_confidence": "high"
+  },
+  {
+    "word": "toreador",
+    "friendly_chunks": ["TOR", "ee", "uh", "dawr"],
+    "say_aloud_tip": "Say it slowly: TOR-ee-uh-dawr",
+    "pronunciation_confidence": "high"
+  },
+  {
+    "word": "toreutics",
+    "phonemes": ["T", "AH0", "R", "UW1", "T", "IH0", "K", "S"],
+    "friendly_chunks": ["tuh", "ROO", "tiks"],
+    "say_aloud_tip": "Say it slowly: tuh-ROO-tiks",
+    "pronunciation_confidence": "high"
+  },
+  {
+    "word": "aniseikonia",
+    "friendly_chunks": ["an", "i", "say", "KOH", "nee", "uh"],
+    "say_aloud_tip": "Say it slowly: an-i-say-KOH-nee-uh",
+    "pronunciation_confidence": "high"
+  },
+  {
+    "word": "nanotechnology",
+    "friendly_chunks": ["nan", "oh", "tek", "NAH", "luh", "jee"],
+    "say_aloud_tip": "Say it slowly: nan-oh-tek-NAH-luh-jee",
+    "pronunciation_confidence": "high"
+  },
+  {
+    "word": "onomatopoeia",
+    "friendly_chunks": ["ah", "nuh", "MAT", "uh", "PEE", "uh"],
+    "say_aloud_tip": "Say it slowly: ah-nuh-MAT-uh-PEE-uh",
+    "pronunciation_confidence": "high"
+  },
+  {
+    "word": "aerophilatelic",
+    "friendly_chunks": ["air", "oh", "fih", "luh", "TEL", "ik"],
+    "say_aloud_tip": "Say it slowly: air-oh-fih-luh-TEL-ik",
+    "pronunciation_confidence": "high"
+  },
+  {
+    "word": "bacteriolytic",
+    "friendly_chunks": ["bak", "teer", "ee", "uh", "LIT", "ik"],
+    "say_aloud_tip": "Say it slowly: bak-teer-ee-uh-LIT-ik",
+    "pronunciation_confidence": "high"
+  },
+  {
+    "word": "plenipotentiary",
+    "friendly_chunks": ["plen", "ih", "puh", "TEN", "shuh", "ree"],
+    "say_aloud_tip": "Say it slowly: plen-ih-puh-TEN-shuh-ree",
+    "pronunciation_confidence": "high"
+  },
+  {
+    "word": "polydactyly",
+    "friendly_chunks": ["pah", "lee", "DAK", "tuh", "lee"],
+    "say_aloud_tip": "Say it slowly: pah-lee-DAK-tuh-lee",
+    "pronunciation_confidence": "high"
+  },
+  {
+    "word": "hiortdahlite",
+    "friendly_chunks": ["HYER", "t", "dah", "lite"],
+    "say_aloud_tip": "Say it slowly: HYER-t-dah-lite",
+    "pronunciation_confidence": "high"
+  },
+  {
+    "word": "erythroblast",
+    "friendly_chunks": ["eh", "rih", "THROH", "blast"],
+    "say_aloud_tip": "Say it slowly: eh-rih-THROH-blast",
+    "pronunciation_confidence": "high"
+  },
+  {
+    "word": "espadrille",
+    "friendly_chunks": ["eh", "spuh", "DRIL"],
+    "say_aloud_tip": "Say it slowly: eh-spuh-DRIL",
+    "pronunciation_confidence": "high"
+  },
+  {
+    "word": "cachexia",
+    "friendly_chunks": ["kuh", "KEK", "see", "uh"],
+    "say_aloud_tip": "Say it slowly: kuh-KEK-see-uh",
+    "pronunciation_confidence": "high"
+  }
+]

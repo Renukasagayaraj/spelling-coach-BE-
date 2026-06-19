@@ -2,6 +2,67 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
+import { applyPronunciationOverride, invalidatePronunciationOverridesCache } from "./pronunciationOverrides.js";
+import type {
+  PatternMatch,
+  WordBreakdown as RuntimeWordBreakdown,
+  WordTeachingOnlyPrecompute,
+} from "./schemas.js";
+
+const StoredPatternMatchSchema = z
+  .object({
+    label: z.string(),
+    matchedText: z.string().optional(),
+    matchedParts: z.array(z.string()).optional(),
+    alternateMatchedParts: z.array(z.array(z.string())).optional(),
+  })
+  .strict();
+
+const StoredWordBreakdownSchema = z
+  .object({
+    display_chunks: z.array(z.string()),
+    alternate_display_chunks: z.array(z.array(z.string())).default([]),
+    chunk_reason: z.string(),
+    matched_patterns: z.array(StoredPatternMatchSchema).default([]),
+  })
+  .strict();
+
+const StoredPhonemeMetadataSchema = z
+  .object({
+    source: z.literal("g2p-en"),
+    phonemes: z.array(z.string()).default([]),
+    sound_aware_patterns: z.array(StoredPatternMatchSchema).default([]),
+    friendly_chunks: z.array(z.string()).default([]),
+    say_aloud_tip: z.string().optional(),
+    pronunciation_confidence: z.enum(["high", "medium", "low"]).optional(),
+  })
+  .strict();
+
+const StoredConceptTeachingSchema = z
+  .object({
+    summary: z.string(),
+    meaning_focus: z.string(),
+    origin_focus: z.string(),
+    morphology_focus: z.string(),
+    origin_labels: z.array(z.string()),
+    morphology_labels: z.array(z.string()),
+    related_forms: z.array(z.string()).default([]),
+  })
+  .strict();
+
+const StoredWordTeachingSchema = z
+  .object({
+    concept_teaching: StoredConceptTeachingSchema,
+  })
+  .strict();
+
+const StoredConceptLabelsSchema = z
+  .object({
+    origin_labels: z.array(z.string()),
+    pattern_labels: z.array(z.string()),
+    morphology_labels: z.array(z.string()),
+  })
+  .strict();
 
 export const WordEntrySchema = z.object({
   word: z.string(),
@@ -15,6 +76,10 @@ export const WordEntrySchema = z.object({
   common_mistakes: z.array(z.string()),
   coach_tip: z.string(),
   part_of_speech: z.string(),
+  word_breakdown: StoredWordBreakdownSchema.optional(),
+  word_teaching: StoredWordTeachingSchema.optional(),
+  concept_labels: StoredConceptLabelsSchema.optional(),
+  phoneme_metadata: StoredPhonemeMetadataSchema.optional(),
 });
 
 const WordCatalogSchema = z.array(WordEntrySchema);
@@ -55,6 +120,66 @@ const CUSTOM_WORD_LISTS_FILE = "words.custom.generated.json";
 const FOREIGN_ORIGIN_WORD_LISTS_FILE = "words.foreign.generated.json";
 const REFERENCE_DATA_DIR = join(process.cwd(), "reference_data");
 
+function normalizeStoredWordBreakdown(
+  value: z.infer<typeof StoredWordBreakdownSchema>,
+  additionalPatterns: PatternMatch[] = [],
+): RuntimeWordBreakdown {
+  const filteredPatterns = [...value.matched_patterns, ...additionalPatterns].filter(
+    (pattern) =>
+      pattern.label !== "VCV structure" && pattern.label !== "VCCV structure",
+  );
+
+  return {
+    displayChunks: value.display_chunks,
+    alternateDisplayChunks: value.alternate_display_chunks,
+    chunkReason: value.chunk_reason,
+    matchedPatterns: uniquePatternMatches(filteredPatterns),
+  };
+}
+
+function uniquePatternMatches(values: PatternMatch[]): PatternMatch[] {
+  const seen = new Set<string>();
+  const result: PatternMatch[] = [];
+
+  for (const value of values) {
+    const key = JSON.stringify(value);
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    result.push(value);
+  }
+
+  return result;
+}
+
+function normalizeStoredWordTeaching(
+  value: z.infer<typeof StoredWordTeachingSchema>,
+): WordTeachingOnlyPrecompute["wordTeaching"] {
+  return {
+    conceptTeaching: {
+      summary: value.concept_teaching.summary,
+      meaningFocus: value.concept_teaching.meaning_focus,
+      originFocus: value.concept_teaching.origin_focus,
+      morphologyFocus: value.concept_teaching.morphology_focus,
+      originLabels: value.concept_teaching.origin_labels,
+      morphologyLabels: value.concept_teaching.morphology_labels,
+      relatedForms: value.concept_teaching.related_forms,
+    },
+  };
+}
+
+function normalizeStoredConceptLabels(
+  value: z.infer<typeof StoredConceptLabelsSchema>,
+): WordTeachingOnlyPrecompute["conceptLabels"] {
+  return {
+    originLabels: value.origin_labels,
+    patternLabels: value.pattern_labels,
+    morphologyLabels: value.morphology_labels,
+  };
+}
+
 function readWordCatalogFile(fileName: string): WordEntry[] {
   const absolutePath = join(REFERENCE_DATA_DIR, fileName);
   if (!existsSync(absolutePath)) {
@@ -62,7 +187,7 @@ function readWordCatalogFile(fileName: string): WordEntry[] {
   }
 
   const content = readFileSync(absolutePath, "utf8");
-  return WordCatalogSchema.parse(JSON.parse(content));
+  return WordCatalogSchema.parse(JSON.parse(content)).map(applyPronunciationOverride);
 }
 
 function readCustomWordListsFile(): CustomWordList[] {
@@ -72,7 +197,10 @@ function readCustomWordListsFile(): CustomWordList[] {
   }
 
   const content = readFileSync(absolutePath, "utf8");
-  return CustomWordListsSchema.parse(JSON.parse(content));
+  return CustomWordListsSchema.parse(JSON.parse(content)).map((list) => ({
+    ...list,
+    words: list.words.map(applyPronunciationOverride),
+  }));
 }
 
 function readForeignOriginWordListsFile(): ForeignOriginWordList[] {
@@ -82,7 +210,10 @@ function readForeignOriginWordListsFile(): ForeignOriginWordList[] {
   }
 
   const content = readFileSync(absolutePath, "utf8");
-  return ForeignOriginWordListsSchema.parse(JSON.parse(content));
+  return ForeignOriginWordListsSchema.parse(JSON.parse(content)).map((list) => ({
+    ...list,
+    words: list.words.map(applyPronunciationOverride),
+  }));
 }
 
 export function loadCustomWordLists(): CustomWordList[] {
@@ -133,6 +264,7 @@ export function invalidateWordCatalogCache(): void {
   foreignOriginWordListsCache = null;
   customListRotationCache = new Map();
   foreignOriginRotationCache = new Map();
+  invalidatePronunciationOverridesCache();
 }
 
 function shuffle<T>(values: T[]): T[] {
@@ -167,10 +299,10 @@ function pickNextCustomListWord(
     existing && existing.signature === signature
       ? existing
       : {
-          order: shuffle(words.map((entry) => entry.word.toLowerCase())),
-          nextIndex: 0,
-          signature,
-        };
+        order: shuffle(words.map((entry) => entry.word.toLowerCase())),
+        nextIndex: 0,
+        signature,
+      };
 
   customListRotationCache.set(listId, activeState);
 
@@ -209,10 +341,10 @@ function pickNextForeignOriginWord(
     existing && existing.signature === signature
       ? existing
       : {
-          order: shuffle(words.map((entry) => entry.word.toLowerCase())),
-          nextIndex: 0,
-          signature,
-        };
+        order: shuffle(words.map((entry) => entry.word.toLowerCase())),
+        nextIndex: 0,
+        signature,
+      };
 
   foreignOriginRotationCache.set(key, activeState);
 
@@ -261,6 +393,38 @@ export function loadWordCatalog(): WordEntry[] {
 
   wordCatalogCache = Array.from(mergedCatalog.values());
   return wordCatalogCache;
+}
+
+export function getStoredWordBreakdown(
+  targetWord: string,
+): RuntimeWordBreakdown | null {
+  const word = getWordByText(targetWord);
+  if (!word?.word_breakdown) {
+    return null;
+  }
+
+  return normalizeStoredWordBreakdown(
+    word.word_breakdown,
+    word.phoneme_metadata?.sound_aware_patterns ?? [],
+  );
+}
+
+export function getStoredWordTeachingOnlyPrecompute(
+  targetWord: string,
+): WordTeachingOnlyPrecompute | null {
+  const word = getWordByText(targetWord);
+  if (!word?.word_teaching || !word.concept_labels) {
+    return null;
+  }
+
+  return {
+    wordTeaching: normalizeStoredWordTeaching(word.word_teaching),
+    conceptLabels: normalizeStoredConceptLabels(word.concept_labels),
+  };
+}
+
+export function getStoredSoundAwarePatterns(targetWord: string): PatternMatch[] {
+  return getWordByText(targetWord)?.phoneme_metadata?.sound_aware_patterns ?? [];
 }
 
 export function listCustomWordLists(): Array<{
@@ -376,6 +540,7 @@ export function pickNextWord(
   customListId?: string,
   foreignOrigin?: string,
   ownerUserId?: string,
+  customWordsFallback?: WordEntry[],
 ): WordEntry {
   const excluded = new Set(excludedWords.map((word) => word.toLowerCase()));
   if (foreignOrigin) {
@@ -384,9 +549,9 @@ export function pickNextWord(
     return pickNextForeignOriginWord(foreignOrigin, foreignWords, excluded);
   }
 
-  const customListWords = customListId
+  const customListWords = customWordsFallback ?? (customListId
     ? getCustomWordListById(customListId, ownerUserId)?.words ?? []
-    : [];
+    : []);
   if (customListId) {
     return pickNextCustomListWord(customListId, customListWords, excluded);
   }

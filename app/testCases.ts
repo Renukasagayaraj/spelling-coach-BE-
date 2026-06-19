@@ -8,23 +8,42 @@ import {
   maskWordInExampleSentence,
 } from "./inputBuilder.js";
 import {
-  applyBlendPatternsToPrecompute,
-  getMatchedBlendPatterns,
-} from "./blendPatterns.js";
+  normalizeSpellingCoachOutputChunkReason,
+  normalizeWordTeachingPrecomputeChunkReason,
+} from "./chunkReason.js";
+import {
+  buildSoundAwareTipNote,
+  buildStoredSayAloudTip,
+  deriveFriendlyPronunciationChunks,
+  deriveFriendlyPronunciation,
+  getFriendlyPronunciationCue,
+} from "./friendlyPronunciation.js";
+import { buildDefaultTtsInstructions } from "./pronunciation.js";
+import {
+  auditFriendlyPronunciation,
+  buildPronunciationReviewBuckets,
+} from "./pronunciationConfidence.js";
+import {
+  applyNewPatternsToOutput,
+  getNewMatchedPatterns,
+} from "./newPatternMatcher.js";
+import { getSoundAwareMatchedPatterns } from "./soundAwarePatterns.js";
 import { importCustomWords } from "./customWordImport.js";
 import { importForeignOriginWords } from "./foreignOriginImport.js";
-import { applyDeterministicPatternsToPrecompute } from "./deterministicPatterns.js";
 import {
   hasWordTeachingPrecompute,
   runSplitSpellingCoachAgent,
   warmWordTeachingPrecompute,
 } from "./optimizedCoach.js";
 import {
+  buildMissOnlyPrompt,
+  buildRelatedFormsOnlyPrecomputePrompt,
   buildSpellingCoachPrompt,
   buildWordTeachingPrecomputePrompt,
   SPELLING_COACH_SYSTEM_PROMPT,
 } from "./prompt.js";
 import { runSpellingCoachAgent } from "./runAgent.js";
+import { interpretVoiceUtterance, normalizeSpokenSpelling } from "./voice.js";
 import {
   buildReferenceHintsText,
   buildSpellingRuleHintsText,
@@ -32,10 +51,17 @@ import {
 } from "./referenceData.js";
 import type { DeepAgentLike } from "./agent.js";
 import type { DirectModelLike } from "./directModel.js";
-import type { SpellingCoachInput, SpellingCoachOutput } from "./schemas.js";
+import {
+  parseRelatedFormsOnlyPrecompute,
+  parseWordTeachingOnlyPrecompute,
+  type SpellingCoachInput,
+  type SpellingCoachOutput,
+} from "./schemas.js";
 import {
   getCustomWordListById,
   getForeignOriginWordListByOrigin,
+  getStoredWordBreakdown,
+  getStoredWordTeachingOnlyPrecompute,
   getWordByText,
   listCustomWordListsForUser,
   loadCustomWordLists,
@@ -51,7 +77,6 @@ type OutputOverrides = Omit<
 > & {
   missAnalysis?: Partial<SpellingCoachOutput["missAnalysis"]>;
   wordTeaching?: {
-    formTeaching?: Partial<SpellingCoachOutput["wordTeaching"]["formTeaching"]>;
     conceptTeaching?: Partial<
       SpellingCoachOutput["wordTeaching"]["conceptTeaching"]
     >;
@@ -75,14 +100,6 @@ function makeOutput(overrides: OutputOverrides): SpellingCoachOutput {
       ...overrides.missAnalysis,
     },
     wordTeaching: {
-      formTeaching: {
-        summary: "",
-        patterns: [],
-        chunks: [],
-        chunkReason: "",
-        sayAloudFocus: "",
-        ...overrides.wordTeaching?.formTeaching,
-      },
       conceptTeaching: {
         summary: "",
         meaningFocus: "",
@@ -90,6 +107,7 @@ function makeOutput(overrides: OutputOverrides): SpellingCoachOutput {
         morphologyFocus: "",
         originLabels: [],
         morphologyLabels: [],
+        relatedForms: [],
         ...overrides.wordTeaching?.conceptTeaching,
       },
     },
@@ -116,7 +134,9 @@ function makeOutput(overrides: OutputOverrides): SpellingCoachOutput {
     },
     wordBreakdown: {
       displayChunks: [],
+      alternateDisplayChunks: [],
       chunkReason: "",
+      matchedPatterns: [],
       ...overrides.wordBreakdown,
     },
     conceptLabels: {
@@ -177,13 +197,6 @@ function createMockAgent(output: SpellingCoachOutput): DeepAgentLike {
               role: "assistant",
               content: JSON.stringify({
                 wordTeaching: {
-                  formTeaching: {
-                    summary: "",
-                    patterns: [],
-                    chunks: [],
-                    chunkReason: "",
-                    sayAloudFocus: "",
-                  },
                   conceptTeaching: {
                     summary: "",
                     meaningFocus: "",
@@ -331,13 +344,6 @@ function createDirectMockModel(output: unknown): DirectModelLike {
       if (isLevelOnePrecomputePrompt(lastContent)) {
         return JSON.stringify({
           wordTeaching: {
-            formTeaching: {
-              summary: "",
-              patterns: [],
-              chunks: [],
-              chunkReason: "",
-              sayAloudFocus: "",
-            },
             conceptTeaching: {
               summary: "",
               meaningFocus: "",
@@ -418,15 +424,6 @@ test("handles adscititious missing-letter near miss", async () => {
       summary: "Very close. The attempt drops the s in the sc cluster near the start of the word.",
       errorTypes: ["missing-letter deletion", "consonant cluster omission"],
       primaryErrorFocus: "Remember the sc cluster in ad + scititious.",
-    },
-    wordTeaching: {
-      formTeaching: {
-        summary: "Keep the early sc cluster intact before finishing the -itious ending.",
-        patterns: ["sc-cluster", "-itious"],
-        chunks: ["ad", "scit", "itious"],
-        chunkReason: "The split highlights the missing sc cluster and the stable -itious ending.",
-        sayAloudFocus: "ad-sci-ti-tious",
-      },
     },
     errorRelevance: {
       mostRelevantToError: "form",
@@ -514,13 +511,6 @@ test("handles arachnophagous with heavy phonetic simplification", async () => {
       primaryErrorFocus: "Use the stored patterns ch and ph instead of writing only the sounds you hear.",
     },
     wordTeaching: {
-      formTeaching: {
-        summary: "Chunk the word into arachno + phagous while locking in ch and ph.",
-        patterns: ["ch says k", "ph says f", "-gous"],
-        chunks: ["arachno", "phagous"],
-        chunkReason: "The chunks match the strongest reusable teaching pieces and reduce overload.",
-        sayAloudFocus: "a-rach-no-phag-ous",
-      },
       conceptTeaching: {
         summary: "The concept side links arachno to spider and phagous to eating.",
         meaningFocus: "feeding on spiders",
@@ -570,7 +560,11 @@ test("handles arachnophagous with heavy phonetic simplification", async () => {
 
   assert.equal(result.teachingDecision.strategy, "mixed");
   assert.equal(result.coachingText.memoryTip.includes("arachnid"), true);
-  assert.equal(result.nextStep.shouldReviewSoon, true);
+  assert.deepEqual(result.nextStep, {
+    practiceFocus: "",
+    shouldReviewSoon: false,
+    suggestedSimilarWordTypes: [],
+  });
 });
 
 test("reinforces a correct spelling without over-teaching", async () => {
@@ -625,15 +619,6 @@ test("reinforces a correct spelling without over-teaching", async () => {
       primaryErrorFocus: "Accurate spelling",
       usedMeaningDisambiguationWell: true,
     },
-    wordTeaching: {
-      formTeaching: {
-        summary: "Notice the two short-vowel chunks pul + pit.",
-        patterns: ["closed syllables"],
-        chunks: ["pul", "pit"],
-        chunkReason: "The chunks reinforce the correct short-vowel structure without adding extra complexity.",
-        sayAloudFocus: "pul-pit",
-      },
-    },
     errorRelevance: {
       mostRelevantToError: "unclear",
       confidence: 0.4,
@@ -675,6 +660,7 @@ test("reinforces a correct spelling without over-teaching", async () => {
   assert.equal(result.correctness.isCorrect, true);
   assert.equal(result.correctness.reinforceSuccess, true);
   assert.equal(result.missAnalysis.errorTypes.length, 0);
+  assert.equal(result.coachingText.fullExplanation, "");
 });
 
 test("uses minimal Level 1 coaching output and clears advanced sections", async () => {
@@ -721,13 +707,6 @@ test("uses minimal Level 1 coaching output and clears advanced sections", async 
     directModel: createSequenceMockModel([
       JSON.stringify({
         wordTeaching: {
-          formTeaching: {
-            summary: "",
-            patterns: [],
-            chunks: [],
-            chunkReason: "",
-            sayAloudFocus: "",
-          },
           conceptTeaching: {
             summary: "",
             meaningFocus: "",
@@ -757,11 +736,28 @@ test("uses minimal Level 1 coaching output and clears advanced sections", async 
 
   assert.equal(result.correctness.isCorrect, false);
   assert.equal(result.coachingText.shortFeedback, "Nice try.");
-  assert.equal(result.coachingText.sayAloudTip, "Say a-bout.");
+  assert.equal(result.coachingText.sayAloudTip, "Say it slowly: uh-BOWT");
   assert.equal(result.coachingText.fullExplanation, "");
-  assert.deepEqual(result.wordBreakdown.displayChunks, ["ab", "out"]);
-  assert.equal(result.wordBreakdown.chunkReason, "Has vowel team ou.");
-  assert.equal(result.wordTeaching.formTeaching.summary, "");
+  const storedAboutBreakdown = getStoredWordBreakdown("about");
+  assert.deepEqual(
+    result.wordBreakdown.displayChunks,
+    storedAboutBreakdown?.displayChunks ?? ["ab", "out"],
+  );
+  assert.equal(
+    result.wordBreakdown.chunkReason,
+    storedAboutBreakdown?.chunkReason ?? "The word breaks as ab + out.",
+  );
+  assert.deepEqual(
+    result.wordBreakdown.matchedPatterns,
+    storedAboutBreakdown?.matchedPatterns ?? [
+      { label: "vowel pattern ou" },
+      {
+        label: "two syllables",
+        matchedParts: ["a", "bout"],
+        alternateMatchedParts: [["ab", "out"]],
+      },
+    ],
+  );
   assert.equal(result.wordTeaching.conceptTeaching.summary, "");
   assert.deepEqual(result.conceptLabels.patternLabels, []);
   assert.deepEqual(result.nextStep.suggestedSimilarWordTypes, []);
@@ -811,13 +807,6 @@ test("handles fictitious with missing middle chunk", async () => {
       primaryErrorFocus: "Keep the full ti + tious ending instead of shrinking it to tous.",
     },
     wordTeaching: {
-      formTeaching: {
-        summary: "Spell fictitious as fic + ti + tious.",
-        patterns: ["-itious"],
-        chunks: ["fic", "ti", "tious"],
-        chunkReason: "The chunks expose the exact section that was omitted.",
-        sayAloudFocus: "fic - ti - tious",
-      },
       conceptTeaching: {
         summary: "This word belongs to the made-up or not-real word family.",
         meaningFocus: "made up; not real",
@@ -915,15 +904,6 @@ test("retries when the model returns the wrong JSON shape first", async () => {
       errorTypes: [],
       primaryErrorFocus: "Accurate spelling",
       usedMeaningDisambiguationWell: true,
-    },
-    wordTeaching: {
-      formTeaching: {
-        summary: "Notice the two short-vowel chunks pul + pit.",
-        patterns: ["closed syllables"],
-        chunks: ["pul", "pit"],
-        chunkReason: "The chunks reinforce the correct short-vowel structure without adding extra complexity.",
-        sayAloudFocus: "pul-pit",
-      },
     },
     errorRelevance: {
       mostRelevantToError: "unclear",
@@ -1157,9 +1137,109 @@ test("prompt frames csv data as sample affix families, not a closed list", () =>
   assert.equal(prompt.includes("sample affix and morpheme families"), true);
   assert.equal(prompt.includes("not as a closed dictionary"), true);
   assert.equal(prompt.includes("Local reference hints from curated Greek/Latin morpheme CSVs:"), true);
+  assert.equal(
+    SPELLING_COACH_SYSTEM_PROMPT.includes('"relatedForms": string[]'),
+    true,
+  );
+  assert.equal(
+    SPELLING_COACH_SYSTEM_PROMPT.includes(
+      "first look for a helpful similar-word, word-family, or comparison cue that genuinely supports the spelling.",
+    ),
+    true,
+  );
+  assert.equal(
+    SPELLING_COACH_SYSTEM_PROMPT.includes(
+      "If a useful similar-word comparison is available, prefer it over repeating conceptTeaching.",
+    ),
+    true,
+  );
+  assert.equal(
+    SPELLING_COACH_SYSTEM_PROMPT.includes(
+      "After similar-word comparisons, use pattern, structure, chunking, or letter-choice cues as the next best explanation support.",
+    ),
+    true,
+  );
   assert.equal(SPELLING_COACH_SYSTEM_PROMPT.includes('"mostRelevantToError": "form" | "concept" | "mixed" | "unclear"'), true);
   assert.equal(SPELLING_COACH_SYSTEM_PROMPT.includes('confidence is below 0.75'), true);
   assert.equal(SPELLING_COACH_SYSTEM_PROMPT.includes("Curated spelling-rule hints may be provided"), false);
+});
+
+test("defaults missing related forms to an empty array in concept precompute parsing", () => {
+  const parsed = parseWordTeachingOnlyPrecompute({
+    wordTeaching: {
+      conceptTeaching: {
+        summary: "A test summary.",
+        meaningFocus: "A test meaning.",
+        originFocus: "A test origin.",
+        morphologyFocus: "A test morphology.",
+        originLabels: [],
+        morphologyLabels: [],
+      },
+    },
+    conceptLabels: {
+      originLabels: [],
+      patternLabels: [],
+      morphologyLabels: [],
+    },
+  });
+
+  assert.deepEqual(parsed.wordTeaching.conceptTeaching.relatedForms, []);
+});
+
+test("builds a dedicated related-forms-only precompute prompt", () => {
+  const prompt = buildRelatedFormsOnlyPrecomputePrompt({
+    targetWord: "hypocritical",
+    childAttempt: "hypocritical",
+    childProfile: {
+      childId: "c-related-forms",
+      age: 11,
+      grade: "6",
+      spellingLevel: "advanced",
+    },
+    wordMetadata: {
+      definition: "behaving in a way that says one thing but does another",
+      partOfSpeech: "adjective",
+      pronunciation: "hip-uh-KRIT-uh-kul",
+    },
+    missSignals: {
+      isCorrect: true,
+      nearMiss: false,
+      missingLetters: [],
+      extraLetters: [],
+      substitutedLetters: [],
+      transposedLetters: [],
+      repeatedLetterIssue: false,
+      likelyRushed: false,
+      editDistance: 0,
+    },
+    structuralHints: {
+      syllables: ["hy", "po", "crit", "i", "cal"],
+      likelyChunks: ["hypo", "critic", "al"],
+      detectedPatterns: [],
+    },
+    sessionContext: {
+      mode: "practice",
+      previousAttemptsOnThisWord: 0,
+      previousMissPatterns: [],
+      recentlyPracticedWords: [],
+    },
+  });
+
+  assert.equal(
+    prompt.includes("This is offline precompute for related forms only."),
+    true,
+  );
+  assert.equal(
+    prompt.includes("Do not return the target word itself in relatedForms."),
+    true,
+  );
+  assert.equal(prompt.includes('"relatedForms": string[]'), true);
+});
+
+test("defaults missing related forms to an empty array in related-forms-only parsing", () => {
+  const parsed = parseRelatedFormsOnlyPrecompute({});
+
+  assert.deepEqual(parsed.relatedForms, []);
 });
 
 test("finds local numeric prefix hints from numeric_prefixes.csv", () => {
@@ -1311,6 +1391,148 @@ test("finds supplemental suffix hints from SuffixList.txt", () => {
   assert.equal(txtHint?.source, "suffix_list_csv");
 });
 
+test("uses short memory tip guidance for Level 2 runtime prompts", () => {
+  const input: SpellingCoachInput = {
+    targetWord: "hesitate",
+    childAttempt: "hesitait",
+    childProfile: {
+      childId: "c7",
+      age: 11,
+      grade: "6",
+      spellingLevel: "on-grade",
+    },
+    wordMetadata: {
+      definition: "to pause before acting",
+      partOfSpeech: "verb",
+      pronunciation: "HEZ-uh-tate",
+    },
+    missSignals: {
+      isCorrect: false,
+      nearMiss: false,
+      missingLetters: ["e"],
+      extraLetters: [],
+      substitutedLetters: ["i for e"],
+      transposedLetters: [],
+      repeatedLetterIssue: false,
+      likelyRushed: false,
+      editDistance: 2,
+    },
+    structuralHints: {
+      syllables: ["hes", "i", "tate"],
+      likelyChunks: ["hesi", "tate"],
+      detectedPatterns: ["-ate"],
+      likelySuffix: "ate",
+    },
+    sessionContext: {
+      mode: "practice",
+      previousAttemptsOnThisWord: 0,
+      previousMissPatterns: [],
+      recentlyPracticedWords: ["demonstrate", "celebrate"],
+    },
+  };
+
+  const prompt = buildSpellingCoachPrompt(input);
+
+  assert.equal(
+    prompt.includes(
+      "For Level 2 words, keep coachingText.memoryTip brief: one short intuitive cue.",
+    ),
+    true,
+  );
+  assert.equal(
+    prompt.includes(
+      "For Level 3 words, coachingText.memoryTip may be up to two short lines when that genuinely helps recall.",
+    ),
+    false,
+  );
+});
+
+test("allows a longer memory tip for Level 3 miss-only prompts", () => {
+  const input: SpellingCoachInput = {
+    targetWord: "arachnophagous",
+    childAttempt: "arachnofagus",
+    childProfile: {
+      childId: "c17",
+      age: 12,
+      grade: "7",
+      spellingLevel: "advanced",
+    },
+    wordMetadata: {
+      definition: "Describes animals that eat spiders.",
+      partOfSpeech: "adjective",
+      exampleSentence: "Some birds are arachnophagous and like to eat spiders.",
+      pronunciation: "uh-RAK-no-FAY-gus",
+    },
+    missSignals: {
+      isCorrect: false,
+      nearMiss: false,
+      missingLetters: ["ph", "ou"],
+      extraLetters: [],
+      substitutedLetters: [],
+      transposedLetters: [],
+      repeatedLetterIssue: false,
+      likelyRushed: false,
+      editDistance: 3,
+    },
+    structuralHints: {
+      syllables: ["a", "rach", "no", "pha", "gous"],
+      likelyChunks: ["arachno", "phagous"],
+      detectedPatterns: ["ch says k", "ph says f", "-gous"],
+      likelySuffix: "gous",
+    },
+    sessionContext: {
+      mode: "practice",
+      previousAttemptsOnThisWord: 0,
+      previousMissPatterns: [],
+      recentlyPracticedWords: ["arachnid", "phosphorus"],
+    },
+  };
+
+  const missOnlyPrompt = buildMissOnlyPrompt(
+    input,
+    JSON.stringify(
+      {
+        wordTeaching: {
+          conceptTeaching: {
+            summary: "",
+            meaningFocus: "",
+            originFocus: "",
+            morphologyFocus: "",
+            originLabels: [],
+            morphologyLabels: [],
+          },
+        },
+        wordBreakdown: {
+          displayChunks: ["arachn", "ophag", "ous"],
+          alternateDisplayChunks: [],
+          chunkReason: "",
+          matchedPatterns: [],
+        },
+        conceptLabels: {
+          originLabels: [],
+          patternLabels: [],
+          morphologyLabels: [],
+        },
+      },
+      null,
+      2,
+    ),
+  );
+
+  assert.equal(
+    missOnlyPrompt.includes(
+      "For Level 3 words, coachingText.memoryTip may be up to two short lines when that genuinely helps recall.",
+    ),
+    true,
+  );
+  assert.equal(
+    missOnlyPrompt.includes(
+      "Keep coachingText.memoryTip focused on memory support rather than turning it into another explanation.",
+    ),
+    true,
+  );
+});
+
 test("supports direct runtime path with the same validated output", async () => {
   const input: SpellingCoachInput = {
     targetWord: "pulpit",
@@ -1361,15 +1583,6 @@ test("supports direct runtime path with the same validated output", async () => 
       primaryErrorFocus: "Accurate spelling",
       usedMeaningDisambiguationWell: true,
     },
-    wordTeaching: {
-      formTeaching: {
-        summary: "Notice the two short-vowel chunks pul + pit.",
-        patterns: ["closed syllables"],
-        chunks: ["pul", "pit"],
-        chunkReason: "The chunks reinforce the correct short-vowel structure without adding extra complexity.",
-        sayAloudFocus: "pul-pit",
-      },
-    },
     errorRelevance: {
       mostRelevantToError: "unclear",
       confidence: 0.4,
@@ -1413,6 +1626,47 @@ test("supports direct runtime path with the same validated output", async () => 
   assert.equal(result.teachingDecision.strategy, "pattern");
 });
 
+test("replaces generic precompute chunk reasoning with concrete chunk split", () => {
+  const normalized = normalizeWordTeachingPrecomputeChunkReason({
+    wordTeaching: {
+      conceptTeaching: {
+        summary: "",
+        meaningFocus: "",
+        originFocus: "",
+        morphologyFocus: "",
+        originLabels: [],
+        morphologyLabels: [],
+      },
+    },
+    wordBreakdown: {
+      displayChunks: ["cent", "er"],
+      chunkReason:
+        "These chunks are easy to say and remember, breaking the word into two simple parts that match natural sound groups.",
+    },
+    conceptLabels: {
+      originLabels: [],
+      patternLabels: [],
+      morphologyLabels: [],
+    },
+  });
+
+  assert.equal(normalized.wordBreakdown.chunkReason, "The word breaks as cent + er.");
+});
+
+test("replaces generic output chunk reasoning with concrete chunk split", () => {
+  const normalized = normalizeSpellingCoachOutputChunkReason(
+    makeOutput({
+      wordBreakdown: {
+        displayChunks: ["mon", "ster"],
+        chunkReason:
+          "These chunks are easy to say and remember, breaking the word into two simple parts that match natural sound groups.",
+      },
+    }),
+  );
+
+  assert.equal(normalized.wordBreakdown.chunkReason, "The word breaks as mon + ster.");
+});
+
 test("picks next word from the requested level", () => {
   const word = pickNextWord("2");
   assert.equal(word.level, "2");
@@ -1444,7 +1698,7 @@ test("builds a coaching input from app-level request data", () => {
   assert.equal(input.targetWord, "abandon");
   assert.equal(input.missSignals.isCorrect, false);
   assert.equal(input.missSignals.editDistance > 0, true);
-  assert.equal(input.wordMetadata?.definition.includes("leave"), true);
+  assert.equal(input.wordMetadata?.definition?.includes("leave"), true);
 });
 
 test("builds a public word response from generated word data", () => {
@@ -1543,13 +1797,6 @@ test("accepts explicit empty concept teaching fields when concept support is wea
           primaryErrorFocus: "Keep the short i in the second chunk.",
         },
         wordTeaching: {
-          formTeaching: {
-            summary: "The second chunk is pit, not pet.",
-            patterns: ["closed syllables"],
-            chunks: ["pul", "pit"],
-            chunkReason: "The second chunk holds the short i that was changed.",
-            sayAloudFocus: "pul-pit",
-          },
           conceptTeaching: {
             summary: "",
             meaningFocus: "",
@@ -1616,13 +1863,6 @@ test("supports unclear error relevance below the confidence threshold", async ()
           primaryErrorFocus: "Use ph for the f sound in this word.",
         },
         wordTeaching: {
-          formTeaching: {
-            summary: "This word uses ph for the f sound.",
-            patterns: ["ph says f", "x ending"],
-            chunks: ["ph", "lox"],
-            chunkReason: "The opening pattern is the main spelling feature.",
-            sayAloudFocus: "phlox",
-          },
           conceptTeaching: {
             summary: "This is the flower word.",
             meaningFocus: "flower name",
@@ -1695,26 +1935,26 @@ test("word-level precompute prompt includes curated spelling-rule guidance when 
     const input = buildWordPrecomputeInput("torsion");
     const prompt = buildWordTeachingPrecomputePrompt(input);
 
-  assert.equal(
-    prompt.includes(
-      "Use the curated spelling-rules CSV as a reference list of common spelling rules and rule labels.",
-    ),
-    true,
-  );
-  assert.equal(prompt.includes("Curated spelling-rule hints:"), true);
-  assert.equal(prompt.includes("soft_g_before_e_i_y"), true);
-  assert.equal(
-    prompt.includes(
-      "Use phonetic spelling or simple sound-by-syllable reasoning internally to check whether a sound-based rule truly matches the word.",
-    ),
-    true,
-  );
-  assert.equal(
-    prompt.includes(
-      "If you include a spelling rule label in wordTeaching.formTeaching.patterns, the summary, chunkReason, and sayAloudFocus must agree with that rule.",
-    ),
-    true,
-  );
+    assert.equal(
+      prompt.includes(
+        "Use the curated spelling-rules CSV as a reference list of common spelling rules and rule labels.",
+      ),
+      true,
+    );
+    assert.equal(prompt.includes("Curated spelling-rule hints:"), true);
+    assert.equal(prompt.includes("soft_g_before_e_i_y"), true);
+    assert.equal(
+      prompt.includes(
+        "Use phonetic spelling or simple sound-by-syllable reasoning internally to check whether a sound-based rule truly matches the word.",
+      ),
+      true,
+    );
+    assert.equal(
+      prompt.includes(
+        "Use the curated spelling-rules CSV to identify meaningful pattern labels only when they help conceptTeaching or conceptLabels.",
+      ),
+      true,
+    );
   } finally {
     if (originalFlag === undefined) {
       delete process.env.SPELLING_COACH_RULE_PROMPT_HINTS;
@@ -1767,51 +2007,56 @@ test("word-level precompute prompt separates spelling chunks from concept groupi
     prompt.includes("explain that separately in conceptTeaching instead of forcing wordBreakdown.displayChunks to match it"),
     true,
   );
+  assert.equal(
+    prompt.includes("Do not use generic filler such as 'easy to say and remember' by itself."),
+    true,
+  );
+  assert.equal(
+    prompt.includes("wordBreakdown.chunkReason must mention the actual chunk boundary, ending, blend, digraph, or spelling pattern"),
+    true,
+  );
 });
 
 test("warms word teaching precompute on a word-only input", async () => {
   const input = buildWordPrecomputeInput("torsion");
-  const precomputeOutput = {
-    wordTeaching: {
-      formTeaching: {
-        summary: "This word highlights the -sion ending after tors-.",
-        patterns: ["sion"],
-        chunks: ["tor", "sion"],
-        chunkReason: "The ending chunk carries the main pattern.",
-        sayAloudFocus: "tor-sion",
-      },
-      conceptTeaching: {
-        summary: "The concept centers on twisting.",
-        meaningFocus: "twisting",
-        originFocus: "Latin-derived",
-        morphologyFocus: "",
-        originLabels: ["latin-derived"],
-        morphologyLabels: [],
-      },
-    },
-    wordBreakdown: {
-      displayChunks: ["tor", "sion"],
-      chunkReason: "The ending chunk carries the main pattern.",
-    },
-    conceptLabels: {
-      originLabels: ["latin-derived"],
-      patternLabels: ["sion"],
-      morphologyLabels: [],
-    },
-  };
-
-  assert.equal(hasWordTeachingPrecompute(input, { runtime: "direct" }), false);
+  const storedTorsionBreakdown = getStoredWordBreakdown("torsion");
+  assert.equal(
+    hasWordTeachingPrecompute(input, { runtime: "direct" }),
+    Boolean(storedTorsionBreakdown),
+  );
 
   const result = await warmWordTeachingPrecompute(input, {
     runtime: "direct",
-    directModel: createDirectMockModel(precomputeOutput as never),
+    directModel: {
+      async invoke() {
+        throw new Error("Runtime concept precompute should be disabled by default.");
+      },
+    },
   });
 
-  assert.deepEqual(result.wordBreakdown.displayChunks, ["tor", "sion"]);
+  assert.deepEqual(
+    result.wordBreakdown.displayChunks,
+    storedTorsionBreakdown?.displayChunks ?? ["tor", "sion"],
+  );
+  assert.equal(
+    result.wordTeaching.conceptTeaching.summary,
+    getStoredWordTeachingOnlyPrecompute("torsion")?.wordTeaching.conceptTeaching
+      .summary ?? "",
+  );
+  assert.deepEqual(
+    result.conceptLabels.originLabels,
+    getStoredWordTeachingOnlyPrecompute("torsion")?.conceptLabels.originLabels ??
+      [],
+  );
   assert.equal(hasWordTeachingPrecompute(input, { runtime: "direct" }), true);
 });
 
 test("merges cached word teaching with miss-only analysis on submit", async () => {
+  const originalRuntimeConceptTeaching =
+    process.env.SPELLING_COACH_RUNTIME_CONCEPT_TEACHING;
+  process.env.SPELLING_COACH_RUNTIME_CONCEPT_TEACHING = "on";
+
+  try {
   const submitInput: SpellingCoachInput = {
     targetWord: "torsion",
     childAttempt: "torshun",
@@ -1849,13 +2094,6 @@ test("merges cached word teaching with miss-only analysis on submit", async () =
 
   const precomputeOutput = {
     wordTeaching: {
-      formTeaching: {
-        summary: "This word highlights the -sion ending after tors-.",
-        patterns: ["sion"],
-        chunks: ["tor", "sion"],
-        chunkReason: "The ending chunk carries the main pattern.",
-        sayAloudFocus: "tor-sion",
-      },
       conceptTeaching: {
         summary: "The concept centers on twisting.",
         meaningFocus: "twisting",
@@ -1913,307 +2151,496 @@ test("merges cached word teaching with miss-only analysis on submit", async () =
     },
   };
 
+  const storedTorsionBreakdownForSubmit = getStoredWordBreakdown("torsion");
+  const firstModelResponse = storedTorsionBreakdownForSubmit
+    ? {
+        wordTeaching: {
+          conceptTeaching: precomputeOutput.wordTeaching.conceptTeaching,
+        },
+        conceptLabels: precomputeOutput.conceptLabels,
+      }
+    : precomputeOutput;
+
   const result = await runSplitSpellingCoachAgent(submitInput, {
     runtime: "direct",
     directModel: createSequenceMockModel([
-      JSON.stringify(precomputeOutput),
+      JSON.stringify(firstModelResponse),
       JSON.stringify(missOnlyOutput),
     ]),
   });
 
-  assert.deepEqual(result.wordTeaching.formTeaching.chunks, ["tor", "sion"]);
+  assert.equal(
+    result.coachingText.sayAloudTip,
+    "Say it slowly: TAWR-shun.\nThe -sion ending sounds like shun.",
+  );
+  assert.deepEqual(result.nextStep, {
+    practiceFocus: "",
+    shouldReviewSoon: false,
+    suggestedSimilarWordTypes: [],
+  });
   assert.equal(result.missAnalysis.primaryErrorFocus.includes("-sion"), true);
   assert.equal(result.errorRelevance.mostRelevantToError, "form");
+  } finally {
+    if (originalRuntimeConceptTeaching === undefined) {
+      delete process.env.SPELLING_COACH_RUNTIME_CONCEPT_TEACHING;
+    } else {
+      process.env.SPELLING_COACH_RUNTIME_CONCEPT_TEACHING =
+        originalRuntimeConceptTeaching;
+    }
+  }
 });
 
-test("applies deterministic spelling-rule descriptions for matched word patterns", () => {
-  const precompute = applyDeterministicPatternsToPrecompute("mind", {
-    wordTeaching: {
-      formTeaching: {
-        summary: "",
-        patterns: [],
-        chunks: [],
-        chunkReason: "",
-        sayAloudFocus: "",
+test("clears runtime concept teaching in the full response path when the feature flag is off", async () => {
+  const input: SpellingCoachInput = {
+    targetWord: "torsion",
+    childAttempt: "torshun",
+    childProfile: baseProfile,
+    wordMetadata: {
+      definition: "The act of twisting something.",
+      origin: "Latin",
+      partOfSpeech: "noun",
+      exampleSentence: "The gymnast showed torsion by twisting her body in the air.",
+    },
+    missSignals: {
+      isCorrect: false,
+      nearMiss: false,
+      missingLetters: ["i", "o"],
+      extraLetters: ["h", "u"],
+      substitutedLetters: [],
+      transposedLetters: [],
+      repeatedLetterIssue: false,
+      likelyRushed: false,
+      editDistance: 4,
+    },
+    structuralHints: {
+      syllables: [],
+      likelyChunks: ["tor", "sion"],
+      detectedPatterns: ["sion"],
+      likelySuffix: "sion",
+    },
+    sessionContext: {
+      mode: "practice",
+      previousAttemptsOnThisWord: 0,
+      previousMissPatterns: [],
+      recentlyPracticedWords: [],
+    },
+  };
+
+  const result = await runSpellingCoachAgent(input, {
+    runtime: "direct",
+    directModel: createDirectMockModel({
+      correctness: {
+        isCorrect: false,
+        reinforceSuccess: false,
       },
-      conceptTeaching: {
-        summary: "",
-        meaningFocus: "",
-        originFocus: "",
-        morphologyFocus: "",
-        originLabels: [],
+      missAnalysis: {
+        summary: "The ending was rewritten phonetically as shun.",
+        errorTypes: ["phonetic substitution", "ending confusion"],
+        primaryErrorFocus:
+          "Use the -sion spelling instead of writing shun by sound.",
+        likelyWrongWordInterpretation: false,
+        usedMeaningDisambiguationWell: false,
+      },
+      wordTeaching: {
+        conceptTeaching: {
+          summary: "The concept centers on twisting.",
+          meaningFocus: "twisting",
+          originFocus: "Latin-derived",
+          morphologyFocus: "",
+          originLabels: ["latin-derived"],
+          morphologyLabels: [],
+        },
+      },
+      errorRelevance: {
+        mostRelevantToError: "form",
+        confidence: 0.9,
+        reason: "The miss is centered on the -sion ending pattern.",
+      },
+      teachingDecision: {
+        strategy: "pattern",
+        primaryFocus: "Keep the -sion ending.",
+        secondaryFocuses: ["Chunk it as tor + sion"],
+        confidence: 0.88,
+        rationale:
+          "The miss is specifically about the ending pattern.",
+      },
+      coachingText: {
+        shortFeedback: "You heard the ending, but wrote it by sound.",
+        fullExplanation:
+          "Torsion ends with -sion, not shun. Use the chunk tor + sion to hold the ending in place.",
+        memoryTip: "See the word as tor + sion.",
+        sayAloudTip: "Say tor-sion and hold the sion ending.",
+      },
+      wordBreakdown: {
+        displayChunks: ["tor", "sion"],
+        alternateDisplayChunks: [],
+        chunkReason: "The ending chunk carries the main pattern.",
+        matchedPatterns: [],
+      },
+      conceptLabels: {
+        originLabels: ["latin-derived"],
+        patternLabels: ["sion"],
         morphologyLabels: [],
       },
-    },
-    wordBreakdown: {
-      displayChunks: [],
-      chunkReason: "",
-    },
-    conceptLabels: {
-      originLabels: [],
-      patternLabels: [],
-      morphologyLabels: [],
-    },
+      nextStep: {
+        practiceFocus: "Practice words that end in -sion.",
+        shouldReviewSoon: true,
+        suggestedSimilarWordTypes: ["-sion words"],
+      },
+    }),
   });
 
   assert.equal(
-    precompute.wordTeaching.formTeaching.patterns.includes(
-      "I and O may sometimes say their long sounds before two consonants like -nd or -ld or -st or -lt. -D",
+    result.wordTeaching.conceptTeaching.summary,
+    getStoredWordTeachingOnlyPrecompute("torsion")?.wordTeaching.conceptTeaching
+      .summary ?? "",
+  );
+  assert.deepEqual(
+    result.conceptLabels.originLabels,
+    getStoredWordTeachingOnlyPrecompute("torsion")?.conceptLabels.originLabels ??
+      [],
+  );
+});
+
+test("collects new matcher patterns from concrete and structural rules", () => {
+  const matched = getNewMatchedPatterns("center");
+
+  assert.deepEqual(matched, [
+    { label: "blend nt" },
+    { label: "r-controlled vowel er" },
+    { label: "suffix -er" },
+    {
+      label: "two syllables",
+      matchedParts: ["cen", "ter"],
+      alternateMatchedParts: [["cent", "er"]],
+    },
+  ]);
+});
+
+test("detects double consonant patterns in the new matcher", () => {
+  const matched = getNewMatchedPatterns("occur");
+
+  assert.equal(
+    matched.some((pattern) => pattern.label === "double consonant cc"),
+    true,
+  );
+});
+
+test("adds new matcher patterns to word breakdown", () => {
+  const output = applyNewPatternsToOutput("ghost", makeOutput({}));
+
+  assert.equal(
+    output.wordBreakdown.matchedPatterns.some(
+      (pattern) => pattern.label === "digraph gh",
     ),
     true,
   );
   assert.equal(
-    precompute.conceptLabels.patternLabels.includes(
-      "i_o_long_before_two_consonants",
-    ),
-    true,
-  );
-});
-
-test("identifies blend and word-ending patterns from blends.txt", () => {
-  const matches = getMatchedBlendPatterns("brandy");
-
-  assert.equal(matches.includes("blend br -D"), true);
-  assert.equal(matches.includes("word ending -y -D"), true);
-});
-
-test("prefers the longest overlapping blend pattern from blends.txt", () => {
-  const matches = getMatchedBlendPatterns("monstrosity");
-
-  assert.equal(matches.includes("3-letter blend str -D"), true);
-  assert.equal(matches.includes("blend st -D"), false);
-  assert.equal(matches.includes("blend tr -D"), false);
-});
-
-test("appends blends.txt pattern matches without removing LLM patterns", () => {
-  const precompute = applyBlendPatternsToPrecompute("ship", {
-    wordTeaching: {
-      formTeaching: {
-        summary: "",
-        patterns: ["LLM pattern"],
-        chunks: [],
-        chunkReason: "",
-        sayAloudFocus: "",
-      },
-      conceptTeaching: {
-        summary: "",
-        meaningFocus: "",
-        originFocus: "",
-        morphologyFocus: "",
-        originLabels: [],
-        morphologyLabels: [],
-      },
-    },
-    wordBreakdown: {
-      displayChunks: [],
-      chunkReason: "",
-    },
-    conceptLabels: {
-      originLabels: [],
-      patternLabels: [],
-      morphologyLabels: [],
-    },
-  }, "Greek");
-
-  assert.equal(
-    precompute.wordTeaching.formTeaching.patterns.includes("digraph sh -D"),
-    true,
-  );
-  assert.equal(
-    precompute.wordTeaching.formTeaching.patterns.includes("LLM pattern"),
-    true,
-  );
-});
-
-test("skips blends.txt deterministic patterns for unsupported origins", () => {
-  const precompute = applyBlendPatternsToPrecompute("ship", {
-    wordTeaching: {
-      formTeaching: {
-        summary: "",
-        patterns: ["LLM pattern"],
-        chunks: [],
-        chunkReason: "",
-        sayAloudFocus: "",
-      },
-      conceptTeaching: {
-        summary: "",
-        meaningFocus: "",
-        originFocus: "",
-        morphologyFocus: "",
-        originLabels: [],
-        morphologyLabels: [],
-      },
-    },
-    wordBreakdown: {
-      displayChunks: [],
-      chunkReason: "",
-    },
-    conceptLabels: {
-      originLabels: [],
-      patternLabels: [],
-      morphologyLabels: [],
-    },
-  }, "French");
-
-  assert.deepEqual(precompute.wordTeaching.formTeaching.patterns, ["LLM pattern"]);
-});
-
-test("applies blends.txt deterministic patterns for English origin", () => {
-  const precompute = applyBlendPatternsToPrecompute("ghost", {
-    wordTeaching: {
-      formTeaching: {
-        summary: "",
-        patterns: ["LLM pattern"],
-        chunks: [],
-        chunkReason: "",
-        sayAloudFocus: "",
-      },
-      conceptTeaching: {
-        summary: "",
-        meaningFocus: "",
-        originFocus: "",
-        morphologyFocus: "",
-        originLabels: [],
-        morphologyLabels: [],
-      },
-    },
-    wordBreakdown: {
-      displayChunks: [],
-      chunkReason: "",
-    },
-    conceptLabels: {
-      originLabels: [],
-      patternLabels: [],
-      morphologyLabels: [],
-    },
-  }, "English");
-
-  assert.equal(
-    precompute.wordTeaching.formTeaching.patterns.includes(
-      "silent letter digraph gh -D",
-    ),
-    true,
-  );
-  assert.equal(
-    precompute.wordTeaching.formTeaching.patterns.includes("blend st -D"),
-    true,
-  );
-});
-
-test("applies blends.txt deterministic patterns for Old Norse origin", () => {
-  const precompute = applyBlendPatternsToPrecompute("knife", {
-    wordTeaching: {
-      formTeaching: {
-        summary: "",
-        patterns: ["LLM pattern"],
-        chunks: [],
-        chunkReason: "",
-        sayAloudFocus: "",
-      },
-      conceptTeaching: {
-        summary: "",
-        meaningFocus: "",
-        originFocus: "",
-        morphologyFocus: "",
-        originLabels: [],
-        morphologyLabels: [],
-      },
-    },
-    wordBreakdown: {
-      displayChunks: [],
-      chunkReason: "",
-    },
-    conceptLabels: {
-      originLabels: [],
-      patternLabels: [],
-      morphologyLabels: [],
-    },
-  }, "Old Norse");
-
-  assert.equal(
-    precompute.wordTeaching.formTeaching.patterns.includes(
-      "silent letter digraph kn -D",
+    output.wordBreakdown.matchedPatterns.some(
+      (pattern) => pattern.label === "blend st",
     ),
     true,
   );
 });
 
-test("does not overmatch final ch context rules for which", () => {
-  const precompute = applyDeterministicPatternsToPrecompute("which", {
-    wordTeaching: {
-      formTeaching: {
-        summary: "",
-        patterns: [],
-        chunks: [],
-        chunkReason: "",
-        sayAloudFocus: "",
+test("computes sound-aware matched patterns from phonemes", () => {
+  assert.deepEqual(
+    getSoundAwareMatchedPatterns("city", ["S", "IH1", "T", "IY0"]),
+    [
+      { label: "soft c (phoneme-validated)" },
+      { label: "final y says long e (phoneme-validated)" },
+    ],
+  );
+
+  assert.deepEqual(
+    getSoundAwareMatchedPatterns("boy", ["B", "OY1"]),
+    [{ label: "oi/oy says oi (phoneme-validated)" }],
+  );
+
+  assert.deepEqual(
+    getSoundAwareMatchedPatterns("comb", ["K", "OW1", "M"]),
+    [{ label: "silent b (phoneme-validated)" }],
+  );
+
+  assert.deepEqual(
+    getSoundAwareMatchedPatterns("science", ["S", "AY1", "AH0", "N", "S"]),
+    [{ label: "silent c (phoneme-validated)" }],
+  );
+
+  assert.deepEqual(
+    getSoundAwareMatchedPatterns("sign", ["S", "AY1", "N"]),
+    [{ label: "silent g (phoneme-validated)" }],
+  );
+
+  assert.deepEqual(
+    getSoundAwareMatchedPatterns("high", ["HH", "AY1"]),
+    [
+      { label: "silent gh (phoneme-validated)" },
+      { label: "igh says long i (phoneme-validated)" },
+    ],
+  );
+
+  assert.deepEqual(
+    getSoundAwareMatchedPatterns("what", ["W", "AH1", "T"]),
+    [{ label: "silent h (phoneme-validated)" }],
+  );
+
+  assert.deepEqual(
+    getSoundAwareMatchedPatterns("knee", ["N", "IY1"]),
+    [{ label: "silent k (phoneme-validated)" }],
+  );
+
+  assert.deepEqual(
+    getSoundAwareMatchedPatterns("half", ["HH", "AE1", "F"]),
+    [{ label: "silent l (phoneme-validated)" }],
+  );
+
+  assert.deepEqual(
+    getSoundAwareMatchedPatterns("autumn", ["AO1", "T", "AH0", "M"]),
+    [{ label: "silent n (phoneme-validated)" }],
+  );
+
+  assert.deepEqual(
+    getSoundAwareMatchedPatterns("castle", ["K", "AE1", "S", "AH0", "L"]),
+    [{ label: "silent t (phoneme-validated)" }],
+  );
+
+  assert.deepEqual(
+    getSoundAwareMatchedPatterns("answer", ["AE1", "N", "S", "ER0"]),
+    [{ label: "silent w (phoneme-validated)" }],
+  );
+
+  assert.deepEqual(getSoundAwareMatchedPatterns("ghost", ["G", "OW1", "S", "T"]), []);
+});
+
+test("derives child-friendly pronunciation from ARPAbet-like phonemes", () => {
+  assert.deepEqual(
+    deriveFriendlyPronunciationChunks(["AO0", "TH", "EH1", "N", "T", "AH0", "K", "EY2", "T"]),
+    ["aw", "THEN", "tuh", "kayt"],
+  );
+  assert.equal(
+    deriveFriendlyPronunciation(["S", "IH1", "G", "N", "AH0", "T"]),
+    "SIG-nuht",
+  );
+  assert.equal(
+    deriveFriendlyPronunciation(["F", "OW1", "T", "AH0", "G", "R", "AE2", "F"]),
+    "FOH-tuh-graf",
+  );
+  assert.equal(deriveFriendlyPronunciation(["T", "AY1", "M"]), "tym");
+  assert.equal(deriveFriendlyPronunciation(["W", "AY1", "L"]), "wyl");
+});
+
+test("merges stored sound-aware patterns into matched patterns for pilot words", () => {
+  const originalCustomLists = loadCustomWordLists();
+
+  try {
+    saveCustomWordLists([
+      {
+        id: "g2p-pilot-test",
+        name: "G2P Pilot Test",
+        owner_user_id: "legacy",
+        words: [
+          {
+            word: "city",
+            level: "2",
+            grade_band: "",
+            difficulty: "",
+            origin: "",
+            definition: "",
+            example_sentence: "",
+            patterns: [],
+            common_mistakes: [],
+            coach_tip: "",
+            part_of_speech: "",
+            word_breakdown: {
+              display_chunks: ["ci", "ty"],
+              alternate_display_chunks: [],
+              chunk_reason: "The word breaks as ci + ty.",
+              matched_patterns: [
+                {
+                  label: "two syllables",
+                  matchedParts: ["ci", "ty"],
+                },
+              ],
+            },
+            phoneme_metadata: {
+              source: "g2p-en",
+              phonemes: ["S", "IH1", "T", "IY0"],
+              sound_aware_patterns: [
+                {
+                  label: "soft c (phoneme-validated)",
+                },
+              ],
+              friendly_chunks: ["SIH", "tee"],
+              say_aloud_tip: "Say it slowly: SIH-tee",
+            },
+          },
+        ],
       },
-      conceptTeaching: {
-        summary: "",
-        meaningFocus: "",
-        originFocus: "",
-        morphologyFocus: "",
-        originLabels: [],
-        morphologyLabels: [],
+    ]);
+
+    const storedBreakdown = getStoredWordBreakdown("city");
+    assert.ok(storedBreakdown);
+    assert.equal(
+      storedBreakdown?.matchedPatterns.some(
+        (pattern) => pattern.label === "soft c (phoneme-validated)",
+      ),
+      true,
+    );
+
+    const output = applyNewPatternsToOutput("city", makeOutput({}));
+    assert.equal(
+      output.wordBreakdown.matchedPatterns.some(
+        (pattern) => pattern.label === "soft c (phoneme-validated)",
+      ),
+      true,
+    );
+  } finally {
+    saveCustomWordLists(originalCustomLists);
+  }
+});
+
+test("uses friendly pronunciation cue for words with stored phonemes", () => {
+  assert.equal(getFriendlyPronunciationCue("about"), "Say it slowly: uh-BOWT");
+  assert.equal(
+    getFriendlyPronunciationCue("aberration"),
+    "Say it slowly: a-ber-AY-shuhn",
+  );
+});
+
+test("adds deterministic sound-aware notes to stored say-aloud tips", () => {
+  assert.equal(
+    buildStoredSayAloudTip("phlox", ["F", "L", "AA1", "K", "S"], ["flahks"]),
+    "Sounds like: flahks.\nThe ph makes the f sound.",
+  );
+  assert.equal(
+    buildStoredSayAloudTip("muscle", ["M", "AH1", "S", "AH0", "L"], [
+      "MUS",
+      "suhl",
+    ]),
+    "Say it slowly: MUS-suhl.\nThe final e is there, but the u does not say its name.",
+  );
+});
+
+test("builds sound-aware notes for silent letters and long-u silent-e words", () => {
+  assert.equal(
+    buildSoundAwareTipNote("answer", ["AE1", "N", "S", "ER0"]),
+    "The w is silent here.",
+  );
+  assert.equal(
+    buildSoundAwareTipNote("altitude", [
+      "AE1",
+      "L",
+      "T",
+      "AH0",
+      "T",
+      "UW2",
+      "D",
+    ]),
+    "The final e helps the u say its name.",
+  );
+  assert.equal(
+    buildSoundAwareTipNote("tide", ["T", "AY1", "D"]),
+    "The final e helps the i say its name.",
+  );
+  assert.equal(
+    buildSoundAwareTipNote("note", ["N", "OW1", "T"]),
+    "The final e helps the o say its name.",
+  );
+  assert.equal(
+    buildSoundAwareTipNote("made", ["M", "EY1", "D"]),
+    "The final e helps the a say its name.",
+  );
+});
+
+test("suppresses soft c for cious endings", () => {
+  const patterns = getSoundAwareMatchedPatterns("gracious", [
+    "G",
+    "R",
+    "EY1",
+    "SH",
+    "AH0",
+    "S",
+  ]);
+
+  assert.equal(
+    patterns.some((pattern) => pattern.label === "soft c (phoneme-validated)"),
+    false,
+  );
+});
+
+test("prefers stored say-aloud tip metadata when available", () => {
+  const originalCustomLists = loadCustomWordLists();
+
+  try {
+    saveCustomWordLists([
+      {
+        id: "say-aloud-test",
+        name: "Say Aloud Test",
+        owner_user_id: "legacy",
+        words: [
+          {
+            word: "city",
+            level: "2",
+            grade_band: "",
+            difficulty: "",
+            origin: "",
+            definition: "",
+            example_sentence: "",
+            patterns: [],
+            common_mistakes: [],
+            coach_tip: "",
+            part_of_speech: "",
+            phoneme_metadata: {
+              source: "g2p-en",
+              phonemes: ["S", "IH1", "T", "IY0"],
+              sound_aware_patterns: [],
+              friendly_chunks: ["sih", "TEE"],
+              say_aloud_tip: "Say it slowly: SIH-tee",
+            },
+          },
+        ],
       },
-    },
-    wordBreakdown: {
-      displayChunks: [],
-      chunkReason: "",
-    },
-    conceptLabels: {
-      originLabels: [],
-      patternLabels: [],
-      morphologyLabels: [],
+    ]);
+
+    assert.equal(getFriendlyPronunciationCue("city"), "Say it slowly: SIH-tee");
+  } finally {
+    saveCustomWordLists(originalCustomLists);
+  }
+});
+
+test("flags awkward child-friendly pronunciation renderings with medium confidence", () => {
+  const audit = auditFriendlyPronunciation({
+    word: "time",
+    level: "1",
+    phoneme_metadata: {
+      phonemes: ["T", "AY1", "M"],
+      friendly_chunks: ["TEYEM"],
+      say_aloud_tip: "Sounds like: TEYEM",
     },
   });
 
+  assert.equal(audit.confidence, "low");
   assert.equal(
-    precompute.conceptLabels.patternLabels.includes("final_ch_after_consonant"),
-    false,
+    audit.flags.includes("known awkward respelling pattern"),
+    true,
   );
-  assert.equal(
-    precompute.conceptLabels.patternLabels.includes(
-      "final_ch_after_two_letter_vowel",
-    ),
-    false,
-  );
+  assert.equal(audit.flags.includes("all-caps single lump"), true);
 });
 
-test("suppresses deterministic rule matches when the word is listed as an exception", () => {
-  const precompute = applyDeterministicPatternsToPrecompute("the", {
-    wordTeaching: {
-      formTeaching: {
-        summary: "",
-        patterns: [],
-        chunks: [],
-        chunkReason: "",
-        sayAloudFocus: "",
-      },
-      conceptTeaching: {
-        summary: "",
-        meaningFocus: "",
-        originFocus: "",
-        morphologyFocus: "",
-        originLabels: [],
-        morphologyLabels: [],
-      },
-    },
-    wordBreakdown: {
-      displayChunks: [],
-      chunkReason: "",
-    },
-    conceptLabels: {
-      originLabels: [],
-      patternLabels: [],
-      morphologyLabels: [],
+test("groups flagged pronunciations into review buckets", () => {
+  const entry = auditFriendlyPronunciation({
+    word: "toreador",
+    level: "2",
+    phoneme_metadata: {
+      phonemes: ["T", "AO2", "R", "IY0", "AH0", "D", "AO1", "R"],
+      friendly_chunks: ["TROY", "er", "dawr"],
+      say_aloud_tip: "Say it slowly: TROY-er-dawr",
     },
   });
 
-  assert.equal(
-    precompute.conceptLabels.patternLabels.includes("cv_one_syllable_long_vowel"),
-    false,
-  );
+  const buckets = buildPronunciationReviewBuckets([entry]);
+  assert.equal(buckets.suspicious_oy_without_oi_oy.length, 1);
 });
 
 test("imports named custom lists and supports list-scoped practice lookup", async () => {
@@ -2498,4 +2925,174 @@ test("accepts foreign-origin next-word queries without level", () => {
 
   assert.equal(query.foreignOrigin, "Italian");
   assert.equal(query.level, undefined);
+});
+
+test("classifies sentence request as a voice support intent", () => {
+  const result = interpretVoiceUtterance("about", "Can you use it in a sentence?");
+
+  assert.equal(result.intent, "example_sentence");
+  assert.equal(result.displayText, "can you use it in a sentence");
+  if (result.intent === "example_sentence") {
+    assert.equal(result.spokenText.length > 0, true);
+  }
+});
+
+test("classifies origin request as a voice support intent", () => {
+  const result = interpretVoiceUtterance("about", "What is the language of origin?");
+
+  assert.equal(result.intent, "origin");
+  assert.equal(result.displayText, "what is the language of origin");
+  if (result.intent === "origin") {
+    assert.equal(result.spokenText.includes("comes from"), true);
+  }
+});
+
+test("classifies 'say the word' as a repeat-word voice support intent", () => {
+  const result = interpretVoiceUtterance("about", "Say the word");
+
+  assert.equal(result.intent, "repeat_word");
+  assert.equal(result.displayText, "say the word");
+  if (result.intent === "repeat_word") {
+    assert.equal(result.spokenText.includes("Spell this word: about"), true);
+  }
+});
+
+test("classifies 'what's the word again' as a repeat-word voice support intent", () => {
+  const result = interpretVoiceUtterance("about", "What's the word again?");
+
+  assert.equal(result.intent, "repeat_word");
+  assert.equal(result.displayText, "what's the word again");
+  if (result.intent === "repeat_word") {
+    assert.equal(result.spokenText.includes("Spell this word: about"), true);
+  }
+});
+
+test("classifies 'tell me the word' as a repeat-word voice support intent", () => {
+  const result = interpretVoiceUtterance("about", "Tell me the word");
+
+  assert.equal(result.intent, "repeat_word");
+  assert.equal(result.displayText, "tell me the word");
+  if (result.intent === "repeat_word") {
+    assert.equal(result.spokenText.includes("Spell this word: about"), true);
+  }
+});
+
+test("classifies 'tell me the word again' as a repeat-word voice support intent", () => {
+  const result = interpretVoiceUtterance("about", "Tell me the word again");
+
+  assert.equal(result.intent, "repeat_word");
+  assert.equal(result.displayText, "tell me the word again");
+  if (result.intent === "repeat_word") {
+    assert.equal(result.spokenText.includes("Spell this word: about"), true);
+  }
+});
+
+test("classifies 'tell the word' as a repeat-word voice support intent", () => {
+  const result = interpretVoiceUtterance("about", "Tell the word");
+
+  assert.equal(result.intent, "repeat_word");
+  assert.equal(result.displayText, "tell the word");
+  if (result.intent === "repeat_word") {
+    assert.equal(result.spokenText.includes("Spell this word: about"), true);
+  }
+});
+
+test("classifies 'tell the word again' as a repeat-word voice support intent", () => {
+  const result = interpretVoiceUtterance("about", "Tell the word again");
+
+  assert.equal(result.intent, "repeat_word");
+  assert.equal(result.displayText, "tell the word again");
+  if (result.intent === "repeat_word") {
+    assert.equal(result.spokenText.includes("Spell this word: about"), true);
+  }
+});
+
+test("classifies 'can i have the word please' as a repeat-word voice support intent", () => {
+  const result = interpretVoiceUtterance("about", "Can I have the word please?");
+
+  assert.equal(result.intent, "repeat_word");
+  assert.equal(result.displayText, "can i have the word please");
+  if (result.intent === "repeat_word") {
+    assert.equal(result.spokenText.includes("Spell this word: about"), true);
+  }
+});
+
+test("masks the target word in support-request display text", () => {
+  const result = interpretVoiceUtterance(
+    "cranium",
+    "What does cranium mean?",
+  );
+
+  assert.equal(result.intent, "definition");
+  assert.equal(result.displayText, "what does the challenge word mean");
+});
+
+test("blocks exact target-word utterances from appearing as spelling input", () => {
+  const result = interpretVoiceUtterance("cranium", "cranium");
+
+  assert.equal(result.intent, "unknown");
+  assert.equal(result.displayText, "Sorry, I can't spell it for you.");
+});
+
+test("normalizes hyphenated spoken spelling into letters", () => {
+  const result = normalizeSpokenSpelling("u-n-i-c-o-r-n");
+
+  assert.equal(result?.parsedAttempt, "unicorn");
+  assert.equal((result?.confidence ?? 0) > 0.9, true);
+});
+
+test("normalizes common spoken letter names into spelling text", () => {
+  const result = normalizeSpokenSpelling("you en eye see oh ar en");
+
+  assert.equal(result?.parsedAttempt, "unicorn");
+  assert.equal((result?.confidence ?? 0) >= 0.85, true);
+});
+
+test("classifies spoken letters as a spelling attempt", () => {
+  const result = interpretVoiceUtterance("about", "a b o u t");
+
+  assert.equal(result.intent, "spelling_attempt");
+  if (result.intent === "spelling_attempt") {
+    assert.equal(result.parsedAttempt, "about");
+    assert.equal(result.shouldAutoSubmit, false);
+  }
+});
+
+test("recovers collapsed short transcripts as spelling attempts", () => {
+  const result = interpretVoiceUtterance("bias", "bia");
+
+  assert.equal(result.intent, "spelling_attempt");
+  if (result.intent === "spelling_attempt") {
+    assert.equal(result.parsedAttempt, "bia");
+    assert.equal(result.shouldAutoSubmit, false);
+    assert.equal(result.confidence >= 0.7, true);
+  }
+});
+
+test("treats short incorrect collapsed spellings as attempts instead of unknown", () => {
+  const result = interpretVoiceUtterance("about", "abot");
+
+  assert.equal(result.intent, "spelling_attempt");
+  if (result.intent === "spelling_attempt") {
+    assert.equal(result.parsedAttempt, "abot");
+  }
+});
+
+test("uses strict read-exactly TTS instructions for pronunciation prompts", () => {
+  const original = process.env.SPELLING_COACH_TTS_INSTRUCTIONS;
+  process.env.SPELLING_COACH_TTS_INSTRUCTIONS = "on";
+
+  try {
+    assert.equal(
+      buildDefaultTtsInstructions("Spell this word: anorak."),
+      "Read the provided text exactly. Do not omit the target word. Say the word once clearly and naturally.",
+    );
+    assert.equal(buildDefaultTtsInstructions("Hello there."), undefined);
+  } finally {
+    if (original === undefined) {
+      delete process.env.SPELLING_COACH_TTS_INSTRUCTIONS;
+    } else {
+      process.env.SPELLING_COACH_TTS_INSTRUCTIONS = original;
+    }
+  }
 });

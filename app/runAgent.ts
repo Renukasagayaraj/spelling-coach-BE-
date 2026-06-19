@@ -4,8 +4,15 @@ import {
   createDirectSpellingCoachModel,
   type DirectModelLike,
 } from "./directModel.js";
-import { applyBlendPatternsToOutput, getLevelOnePatternNote } from "./blendPatterns.js";
-import { buildLevelOneCoachingPrompt, buildSpellingCoachPrompt } from "./prompt.js";
+import { normalizeSpellingCoachOutputChunkReason } from "./chunkReason.js";
+import { getFriendlyPronunciationCue } from "./friendlyPronunciation.js";
+import { applyNewPatternsToOutput } from "./newPatternMatcher.js";
+import {
+  buildLevelOneCoachingPrompt,
+  buildSpellingCoachPrompt,
+  isNextStepEnabled,
+  isRuntimeConceptTeachingEnabled,
+} from "./prompt.js";
 import {
   parseLevelOneCoachingOutput,
   parseSpellingCoachInput,
@@ -16,7 +23,7 @@ import {
 } from "./schemas.js";
 import type { ZodError } from "zod";
 import { logInfo } from "./logging.js";
-import { getWordByText } from "./wordCatalog.js";
+import { getStoredWordTeachingOnlyPrecompute, getWordByText } from "./wordCatalog.js";
 import { warmWordTeachingPrecompute } from "./optimizedCoach.js";
 
 export type RunSpellingCoachAgentOptions = {
@@ -131,17 +138,75 @@ function isLevelOnePractice(input: SpellingCoachInput): boolean {
   return getWordByText(input.targetWord)?.level === "1";
 }
 
+function clearExplanationForCorrectSpelling(
+  output: SpellingCoachOutput,
+): SpellingCoachOutput {
+  if (!output.correctness.isCorrect) {
+    return output;
+  }
+
+  output.coachingText.fullExplanation = "";
+  return output;
+}
+
+function normalizeNextStepFeature(
+  output: SpellingCoachOutput,
+): SpellingCoachOutput {
+  if (isNextStepEnabled()) {
+    return output;
+  }
+
+  output.nextStep = {
+    practiceFocus: "",
+    shouldReviewSoon: false,
+    suggestedSimilarWordTypes: [],
+  };
+  return output;
+}
+
+function normalizeRuntimeConceptTeachingFeature(
+  targetWord: string,
+  output: SpellingCoachOutput,
+): SpellingCoachOutput {
+  if (isRuntimeConceptTeachingEnabled()) {
+    return output;
+  }
+
+  const stored = getStoredWordTeachingOnlyPrecompute(targetWord);
+  if (stored) {
+    output.wordTeaching = stored.wordTeaching;
+    output.conceptLabels = stored.conceptLabels;
+    return output;
+  }
+
+  output.wordTeaching = {
+    conceptTeaching: {
+      summary: "",
+      meaningFocus: "",
+      originFocus: "",
+      morphologyFocus: "",
+      originLabels: [],
+      morphologyLabels: [],
+      relatedForms: [],
+    },
+  };
+  output.conceptLabels = {
+    originLabels: [],
+    patternLabels: [],
+    morphologyLabels: [],
+  };
+  return output;
+}
+
 function buildLevelOneOutput(
   input: SpellingCoachInput,
   coaching: LevelOneCoachingOutput,
-  precomputedChunks: string[],
+  precomputedWordBreakdown: SpellingCoachOutput["wordBreakdown"],
 ): SpellingCoachOutput {
-  const chunks = precomputedChunks.filter(Boolean);
+  const chunks = precomputedWordBreakdown.displayChunks.filter(Boolean);
   const isCorrect = input.missSignals.isCorrect;
-  const patternNote = getLevelOnePatternNote(
-    input.targetWord,
-    input.wordMetadata?.origin,
-  );
+  const friendlyPronunciationCue =
+    getFriendlyPronunciationCue(input.targetWord) ?? coaching.sayAloudTip;
 
   return parseSpellingCoachOutput({
     correctness: {
@@ -156,13 +221,6 @@ function buildLevelOneOutput(
       usedMeaningDisambiguationWell: false,
     },
     wordTeaching: {
-      formTeaching: {
-        summary: "",
-        patterns: [],
-        chunks: [],
-        chunkReason: "",
-        sayAloudFocus: "",
-      },
       conceptTeaching: {
         summary: "",
         meaningFocus: "",
@@ -170,6 +228,7 @@ function buildLevelOneOutput(
         morphologyFocus: "",
         originLabels: [],
         morphologyLabels: [],
+        relatedForms: [],
       },
     },
     errorRelevance: {
@@ -188,11 +247,13 @@ function buildLevelOneOutput(
       shortFeedback: coaching.shortFeedback,
       fullExplanation: "",
       memoryTip: "",
-      sayAloudTip: coaching.sayAloudTip,
+      sayAloudTip: friendlyPronunciationCue,
     },
     wordBreakdown: {
       displayChunks: chunks,
-      chunkReason: patternNote,
+      alternateDisplayChunks: precomputedWordBreakdown.alternateDisplayChunks,
+      chunkReason: precomputedWordBreakdown.chunkReason,
+      matchedPatterns: precomputedWordBreakdown.matchedPatterns,
     },
     conceptLabels: {
       originLabels: [],
@@ -260,7 +321,7 @@ export async function runSpellingCoachAgent(
     const minimalOutput = await invokeLevelOneCoaching(
       validatedInput,
       minimalPrompt,
-      precomputed.wordBreakdown.displayChunks,
+      precomputed.wordBreakdown,
       agent,
       runtime,
       timings,
@@ -276,9 +337,9 @@ export async function runSpellingCoachAgent(
 
   const maxValidationRetries = options.maxValidationRetries ?? 1;
   const promptStart = nowMs();
-  const messages = [
+  const messages: Array<{ role: "user" | "assistant"; content: string }> = [
     {
-      role: "user" as const,
+      role: "user",
       content: buildSpellingCoachPrompt(validatedInput),
     },
   ];
@@ -316,11 +377,23 @@ export async function runSpellingCoachAgent(
     const outputValidationStart = nowMs();
     try {
       const parsedJson = parseStrictJson(payload);
-      const validatedOutput = applyBlendPatternsToOutput(
+      const parsedOutput = parseSpellingCoachOutput(parsedJson);
+      const validatedOutput = applyNewPatternsToOutput(
         validatedInput.targetWord,
-        parseSpellingCoachOutput(parsedJson),
-        validatedInput.wordMetadata?.origin,
+        normalizeSpellingCoachOutputChunkReason(parsedOutput),
       );
+      normalizeRuntimeConceptTeachingFeature(
+        validatedInput.targetWord,
+        validatedOutput,
+      );
+      clearExplanationForCorrectSpelling(validatedOutput);
+      normalizeNextStepFeature(validatedOutput);
+      const friendlyPronunciationCue = getFriendlyPronunciationCue(
+        validatedInput.targetWord,
+      );
+      if (friendlyPronunciationCue) {
+        validatedOutput.coachingText.sayAloudTip = friendlyPronunciationCue;
+      }
       timings.push({
         stage: `output_validation_${attempt + 1}`,
         durationMs: nowMs() - outputValidationStart,
@@ -383,15 +456,15 @@ export async function runSpellingCoachAgent(
 async function invokeLevelOneCoaching(
   input: SpellingCoachInput,
   prompt: string,
-  precomputedChunks: string[],
+  precomputedWordBreakdown: SpellingCoachOutput["wordBreakdown"],
   agent: DeepAgentLike | DirectModelLike,
   runtime: "deep_agent" | "direct",
   timings: TimingEntry[],
   maxValidationRetries: number,
 ): Promise<SpellingCoachOutput> {
-  const messages = [
+  const messages: Array<{ role: "user" | "assistant"; content: string }> = [
     {
-      role: "user" as const,
+      role: "user",
       content: prompt,
     },
   ];
@@ -427,7 +500,7 @@ async function invokeLevelOneCoaching(
       const validatedOutput = buildLevelOneOutput(
         input,
         parseLevelOneCoachingOutput(parsedJson),
-        precomputedChunks,
+        precomputedWordBreakdown,
       );
       timings.push({
         stage: `level1_output_validation_${attempt + 1}`,

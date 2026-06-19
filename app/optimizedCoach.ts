@@ -4,10 +4,15 @@ import {
   createDirectSpellingCoachModel,
   type DirectModelLike,
 } from "./directModel.js";
-import { applyBlendPatternsToPrecompute } from "./blendPatterns.js";
+import { normalizeWordTeachingPrecomputeChunkReason } from "./chunkReason.js";
+import { getFriendlyPronunciationCue } from "./friendlyPronunciation.js";
+import { applyNewPatternsToPrecompute } from "./newPatternMatcher.js";
 import {
   buildLevelOnePrecomputePrompt,
   buildMissOnlyPrompt,
+  isNextStepEnabled,
+  isRuntimeConceptTeachingEnabled,
+  buildWordTeachingOnlyPrecomputePrompt,
   buildWordTeachingPrecomputePrompt,
 } from "./prompt.js";
 import { getConfiguredModelName } from "./modelConfig.js";
@@ -15,15 +20,22 @@ import {
   parseMissOnlyOutput,
   parseSpellingCoachInput,
   parseSpellingCoachOutput,
+  parseWordTeachingOnlyPrecompute,
   parseWordTeachingPrecompute,
   type MissOnlyOutput,
   type SpellingCoachInput,
   type SpellingCoachOutput,
+  type WordBreakdown,
+  type WordTeachingOnlyPrecompute,
   type WordTeachingPrecompute,
 } from "./schemas.js";
 import type { ZodError } from "zod";
 import { logInfo } from "./logging.js";
-import { getWordByText } from "./wordCatalog.js";
+import {
+  getStoredWordBreakdown,
+  getStoredWordTeachingOnlyPrecompute,
+  getWordByText,
+} from "./wordCatalog.js";
 
 type RuntimeMode = "deep_agent" | "direct";
 
@@ -32,6 +44,7 @@ type SharedOptions = {
   directModel?: DirectModelLike;
   model?: string | object;
   runtime?: RuntimeMode;
+  spellingCoachInput?: SpellingCoachInput;
 };
 
 type TimingEntry = {
@@ -159,6 +172,77 @@ function isLevelOnePractice(input: SpellingCoachInput): boolean {
   return getWordByText(input.targetWord)?.level === "1";
 }
 
+function clearExplanationForCorrectSpelling(
+  output: SpellingCoachOutput,
+): SpellingCoachOutput {
+  if (!output.correctness.isCorrect) {
+    return output;
+  }
+
+  output.coachingText.fullExplanation = "";
+  return output;
+}
+
+function normalizeNextStepFeature(
+  output: SpellingCoachOutput,
+): SpellingCoachOutput {
+  if (isNextStepEnabled()) {
+    return output;
+  }
+
+  output.nextStep = {
+    practiceFocus: "",
+    shouldReviewSoon: false,
+    suggestedSimilarWordTypes: [],
+  };
+  return output;
+}
+
+function buildEmptyWordTeaching(): WordTeachingPrecompute["wordTeaching"] {
+  return {
+    conceptTeaching: {
+      summary: "",
+      meaningFocus: "",
+      originFocus: "",
+      morphologyFocus: "",
+      originLabels: [],
+      morphologyLabels: [],
+      relatedForms: [],
+    },
+  };
+}
+
+function buildEmptyConceptLabels(): WordTeachingPrecompute["conceptLabels"] {
+  return {
+    originLabels: [],
+    patternLabels: [],
+    morphologyLabels: [],
+  };
+}
+
+function buildStoredBreakdownPrecompute(
+  wordBreakdown: WordBreakdown,
+): WordTeachingPrecompute {
+  return {
+    wordTeaching: buildEmptyWordTeaching(),
+    wordBreakdown,
+    conceptLabels: buildEmptyConceptLabels(),
+  };
+}
+
+function mergeStoredWordBreakdownIntoPrecompute(
+  precompute: WordTeachingOnlyPrecompute,
+  wordBreakdown: WordBreakdown,
+): WordTeachingPrecompute {
+  return {
+    wordTeaching: {
+      conceptTeaching: precompute.wordTeaching.conceptTeaching,
+    },
+    wordBreakdown,
+    conceptLabels: precompute.conceptLabels,
+  };
+}
+
 async function getRuntimeInvoker(
   options: SharedOptions = {},
 ): Promise<{ runtime: RuntimeMode; invoker: DeepAgentLike | DirectModelLike }> {
@@ -167,7 +251,7 @@ async function getRuntimeInvoker(
     runtime === "deep_agent"
       ? options.agent ?? (await createSpellingCoachAgent({ model: options.model }))
       : options.directModel ??
-        (await createDirectSpellingCoachModel({ model: options.model }));
+      (await createDirectSpellingCoachModel({ model: options.model }));
 
   return { runtime, invoker };
 }
@@ -180,7 +264,7 @@ async function invokeValidatedJson<T>(
   stagePrefix = "model",
 ): Promise<T> {
   const { runtime, invoker } = await getRuntimeInvoker(options);
-  const messages = [{ role: "user" as const, content: prompt }];
+  const messages: Array<{ role: "user" | "assistant"; content: string }> = [{ role: "user", content: prompt }];
   let lastError: unknown;
 
   for (let attempt = 0; attempt <= 1; attempt += 1) {
@@ -189,12 +273,12 @@ async function invokeValidatedJson<T>(
       runtime === "deep_agent"
         ? await (invoker as DeepAgentLike).invoke({ messages })
         : await (invoker as DirectModelLike).invoke([
-            {
-              role: "system",
-              content: buildDirectRuntimeSystemPrompt(),
-            },
-            ...messages,
-          ]);
+          {
+            role: "system",
+            content: buildDirectRuntimeSystemPrompt(),
+          },
+          ...messages,
+        ]);
     timings?.push({
       stage: `${stagePrefix}_invoke_${attempt + 1}`,
       durationMs: nowMs() - invokeStart,
@@ -257,6 +341,14 @@ export function hasWordTeachingPrecompute(
   options: SharedOptions = {},
 ): boolean {
   const validatedInput = parseSpellingCoachInput(input);
+  if (isLevelOnePractice(validatedInput)) {
+    return false;
+  }
+
+  if (getStoredWordBreakdown(validatedInput.targetWord)) {
+    return true;
+  }
+
   const runtime = resolveRuntime(options.runtime);
   return wordTeachingCache.has(buildCacheKey(validatedInput, runtime, options.model));
 }
@@ -266,6 +358,32 @@ export function warmWordTeachingPrecompute(
   options: SharedOptions = {},
 ): Promise<WordTeachingPrecompute> {
   const validatedInput = parseSpellingCoachInput(input);
+  const storedWordBreakdown = getStoredWordBreakdown(validatedInput.targetWord);
+  const storedWordTeachingOnly = getStoredWordTeachingOnlyPrecompute(
+    validatedInput.targetWord,
+  );
+  if (storedWordBreakdown && isLevelOnePractice(validatedInput)) {
+    return Promise.resolve(buildStoredBreakdownPrecompute(storedWordBreakdown));
+  }
+
+  if (storedWordBreakdown && !isRuntimeConceptTeachingEnabled()) {
+    if (storedWordTeachingOnly) {
+      return Promise.resolve(
+        applyNewPatternsToPrecompute(
+          validatedInput.targetWord,
+          normalizeWordTeachingPrecomputeChunkReason(
+            mergeStoredWordBreakdownIntoPrecompute(
+              storedWordTeachingOnly,
+              storedWordBreakdown,
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Promise.resolve(buildStoredBreakdownPrecompute(storedWordBreakdown));
+  }
+
   const runtime = resolveRuntime(options.runtime);
   const cacheKey = buildCacheKey(validatedInput, runtime, options.model);
   const cached = wordTeachingCache.get(cacheKey);
@@ -274,25 +392,45 @@ export function warmWordTeachingPrecompute(
     return cached;
   }
 
-  const promise = invokeValidatedJson(
-    isLevelOnePractice(validatedInput)
+  const prompt = storedWordBreakdown
+    ? buildWordTeachingOnlyPrecomputePrompt(validatedInput)
+    : isLevelOnePractice(validatedInput)
       ? buildLevelOnePrecomputePrompt(validatedInput)
-      : buildWordTeachingPrecomputePrompt(validatedInput),
-    parseWordTeachingPrecompute,
-    options,
+      : buildWordTeachingPrecomputePrompt(validatedInput);
+  const parser = storedWordBreakdown
+    ? parseWordTeachingOnlyPrecompute
+    : parseWordTeachingPrecompute;
+
+  const promise = invokeValidatedJson(
+    prompt,
+    parser as (output: unknown) => WordTeachingPrecompute | WordTeachingOnlyPrecompute,
+    { ...options, spellingCoachInput: validatedInput },
     undefined,
     "precompute_model",
   )
-    .then((precompute) =>
-      applyBlendPatternsToPrecompute(
+    .then((precompute) => {
+      if (storedWordBreakdown) {
+        const mergedPrecompute = mergeStoredWordBreakdownIntoPrecompute(
+          precompute as WordTeachingOnlyPrecompute,
+          storedWordBreakdown,
+        );
+        return applyNewPatternsToPrecompute(
+          validatedInput.targetWord,
+          normalizeWordTeachingPrecomputeChunkReason(mergedPrecompute),
+        );
+      }
+
+      return applyNewPatternsToPrecompute(
         validatedInput.targetWord,
-        precompute,
-        validatedInput.wordMetadata?.origin,
-      ))
+        normalizeWordTeachingPrecomputeChunkReason(
+          precompute as WordTeachingPrecompute,
+        ),
+      );
+    })
     .catch((error) => {
-    wordTeachingCache.delete(cacheKey);
-    throw error;
-  });
+      wordTeachingCache.delete(cacheKey);
+      throw error;
+    });
 
   wordTeachingCache.set(cacheKey, promise);
   return promise;
@@ -314,7 +452,7 @@ export async function runSplitSpellingCoachAgent(
   const missOnly = await invokeValidatedJson<MissOnlyOutput>(
     buildMissOnlyPrompt(validatedInput, JSON.stringify(precomputed, null, 2)),
     parseMissOnlyOutput,
-    options,
+    { ...options, spellingCoachInput: validatedInput },
     timings,
     "miss_model",
   );
@@ -323,7 +461,15 @@ export async function runSplitSpellingCoachAgent(
   const result = parseSpellingCoachOutput({
     ...missOnly,
     ...precomputed,
-    });
+  });
+  clearExplanationForCorrectSpelling(result);
+  normalizeNextStepFeature(result);
+  const friendlyPronunciationCue = getFriendlyPronunciationCue(
+    validatedInput.targetWord,
+  );
+  if (friendlyPronunciationCue) {
+    result.coachingText.sayAloudTip = friendlyPronunciationCue;
+  }
   timings.push({
     stage: "merge_validation",
     durationMs: nowMs() - mergeStart,

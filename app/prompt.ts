@@ -4,6 +4,34 @@ import {
   buildSpellingRuleHintsText,
   isSpellingRulePromptHintsEnabled,
 } from "./referenceData.js";
+import { getWordByText } from "./wordCatalog.js";
+
+export function isNextStepEnabled(): boolean {
+  return process.env.SPELLING_COACH_NEXT_STEP === "on";
+}
+
+export function isRuntimeConceptTeachingEnabled(): boolean {
+  return process.env.SPELLING_COACH_RUNTIME_CONCEPT_TEACHING === "on";
+}
+
+function getMemoryTipPromptGuidance(targetWord: string): string[] {
+  const level = getWordByText(targetWord)?.level;
+
+  if (level === "3") {
+    return [
+      "For Level 3 words, coachingText.memoryTip may be up to two short lines when that genuinely helps recall.",
+      "Keep coachingText.memoryTip focused on memory support rather than turning it into another explanation.",
+    ];
+  }
+
+  if (level === "2") {
+    return [
+      "For Level 2 words, keep coachingText.memoryTip brief: one short intuitive cue.",
+    ];
+  }
+
+  return ["Keep coachingText.memoryTip brief and focused on recall."];
+}
 
 export const SPELLING_COACH_OUTPUT_SCHEMA_TEXT = `{
   "correctness": {
@@ -18,20 +46,14 @@ export const SPELLING_COACH_OUTPUT_SCHEMA_TEXT = `{
     "usedMeaningDisambiguationWell": boolean
   },
   "wordTeaching": {
-    "formTeaching": {
-      "summary": string,
-      "patterns": string[],
-      "chunks": string[],
-      "chunkReason": string,
-      "sayAloudFocus": string
-    },
     "conceptTeaching": {
       "summary": string,
       "meaningFocus": string,
       "originFocus": string,
       "morphologyFocus": string,
       "originLabels": string[],
-      "morphologyLabels": string[]
+      "morphologyLabels": string[],
+      "relatedForms": string[]
     }
   },
   "errorRelevance": {
@@ -54,7 +76,16 @@ export const SPELLING_COACH_OUTPUT_SCHEMA_TEXT = `{
   },
   "wordBreakdown": {
     "displayChunks": string[],
-    "chunkReason": string
+    "alternateDisplayChunks": string[][],
+    "chunkReason": string,
+    "matchedPatterns": [
+      {
+        "label": string,
+        "matchedText": string?,
+        "matchedParts": string[]?,
+        "alternateMatchedParts": string[][]?
+      }
+    ]
   },
   "conceptLabels": {
     "originLabels": string[],
@@ -70,25 +101,28 @@ export const SPELLING_COACH_OUTPUT_SCHEMA_TEXT = `{
 
 export const WORD_TEACHING_PRECOMPUTE_SCHEMA_TEXT = `{
   "wordTeaching": {
-    "formTeaching": {
-      "summary": string,
-      "patterns": string[],
-      "chunks": string[],
-      "chunkReason": string,
-      "sayAloudFocus": string
-    },
     "conceptTeaching": {
       "summary": string,
       "meaningFocus": string,
       "originFocus": string,
       "morphologyFocus": string,
       "originLabels": string[],
-      "morphologyLabels": string[]
+      "morphologyLabels": string[],
+      "relatedForms": string[]
     }
   },
   "wordBreakdown": {
     "displayChunks": string[],
-    "chunkReason": string
+    "alternateDisplayChunks": string[][],
+    "chunkReason": string,
+    "matchedPatterns": [
+      {
+        "label": string,
+        "matchedText": string?,
+        "matchedParts": string[]?,
+        "alternateMatchedParts": string[][]?
+      }
+    ]
   },
   "conceptLabels": {
     "originLabels": string[],
@@ -143,6 +177,36 @@ export const LEVEL_ONE_COACHING_SCHEMA_TEXT = `{
   "sayAloudTip": string
 }`;
 
+export const WORD_TEACHING_ONLY_PRECOMPUTE_SCHEMA_TEXT = `{
+  "wordTeaching": {
+    "conceptTeaching": {
+      "summary": string,
+      "meaningFocus": string,
+      "originFocus": string,
+      "morphologyFocus": string,
+      "originLabels": string[],
+      "morphologyLabels": string[],
+      "relatedForms": string[]
+    }
+  },
+  "conceptLabels": {
+    "originLabels": string[],
+    "patternLabels": string[],
+    "morphologyLabels": string[]
+  }
+}`;
+
+export const WORD_BREAKDOWN_PRECOMPUTE_SCHEMA_TEXT = `{
+  "displayChunks": string[],
+  "alternateDisplayChunks": string[][],
+  "chunkReason": string,
+  "matchedPatterns": []
+}`;
+
+export const RELATED_FORMS_ONLY_PRECOMPUTE_SCHEMA_TEXT = `{
+  "relatedForms": string[]
+}`;
+
 const SPELLING_RULE_PROMPT_GUIDANCE = `
 - Curated spelling-rule hints may be provided from the app's spelling-rules CSV.
 - Use those rule hints as a rule vocabulary and teaching aid, not as a closed or exhaustive list.
@@ -158,13 +222,7 @@ const SPELLING_RULE_PROMPT_GUIDANCE = `
 - Use phonetic spelling or simple sound-by-syllable reasoning internally to check whether a sound-based rule truly matches the word.
 - Consider syllables, stress, silent letters, and grapheme-to-sound correspondences when deciding whether a sound-based rule applies.
 - Do not output phonetic spelling unless it directly helps the child understand the spelling.
-- If you include a spelling rule label in wordTeaching.formTeaching.patterns, the summary, chunkReason, and sayAloudFocus must agree with that rule.
-- Do not describe the vowel, consonant, or sound behavior in a way that contradicts the selected rule label.
-- Example: if you include i_o_long_before_two_consonants, do not describe the vowel as short.
-- Do not introduce morphology, roots, or prefix explanations in formTeaching unless they genuinely help explain the spelling of the word.
-- Do not force a prefix, root, or suffix explanation for a simple pattern-based word.
-- Surface applicable rule-backed patterns and applicable identified features in wordTeaching.formTeaching.patterns and conceptLabels.patternLabels.
-- Prefer more specific rule-backed patterns over broad generic labels when both could apply.
+- Use these rule hints only to support conceptTeaching and conceptLabels.patternLabels when they genuinely help.
 - Prefer normalized rule labels from the provided spelling-rule list when possible.
 - Do not force a spelling rule if it is weak, uncertain, or not genuinely helpful for the word.`;
 
@@ -179,7 +237,7 @@ Goals:
 1. Diagnose the child's miss in a clear, useful way.
 2. Choose the best teaching strategy for this specific miss.
 3. Explain the word in a child-friendly way.
-4. Always include both a form-based teaching view and a concept-based teaching view when possible.
+4. Always include the concept-based teaching view when possible.
 5. Prefer direct spelling help over abstract linguistic detail.
 6. Return structured JSON only.
 
@@ -194,10 +252,11 @@ Important teaching rules:
 - If structural hints are provided, treat them as hints, not guaranteed truth.
 - Prefer explaining the child's actual mistake over giving generic word trivia.
 - If the child spelled the word correctly, reinforce success and mention at most one reusable spelling insight.
-- Keep wordTeaching.formTeaching explanatory and focused on spelling patterns or chunking.
 - Keep wordTeaching.conceptTeaching explanatory and focused on meaning, origin, or morphology.
+- When a word has real same-family forms in other parts of speech or closely related forms, include them in wordTeaching.conceptTeaching.relatedForms.
+- Only include genuine related forms. If you are unsure, return relatedForms as an empty array.
 - conceptLabels are analytics labels, not the main explanation.
-- wordBreakdown is the normalized reusable chunk section, even if wordTeaching.formTeaching.chunks overlaps with it.
+- wordBreakdown is the normalized reusable spelling/form section.
 
 Teaching strategy options:
 - concept
@@ -240,6 +299,14 @@ Additional constraints:
 - If a non-Greek or non-Latin breakdown is uncertain, weak, or not directly helpful, leave it out.
 - usedMeaningDisambiguationWell should be true only when the child's attempt shows they likely used definition, example, or origin effectively. If evidence is weak, default to false rather than guessing.
 - If concept support is weak, keep wordTeaching.conceptTeaching strings empty and labels empty instead of inventing content.
+- In coachingText.fullExplanation, first look for a helpful similar-word, word-family, or comparison cue that genuinely supports the spelling.
+- If a useful similar-word comparison is available, prefer it over repeating conceptTeaching.
+- After similar-word comparisons, use pattern, structure, chunking, or letter-choice cues as the next best explanation support.
+- Keep coachingText.fullExplanation mostly focused on the child's spelling error, correction path, chunking, pattern, structure, letter choice, or similar-word comparison.
+- Do not restate wordTeaching.conceptTeaching.summary in coachingText.fullExplanation.
+- Only mention meaning, origin, or morphology in coachingText.fullExplanation when the miss genuinely cannot be explained well without that concept support.
+- Keep coachingText.memoryTip focused on recall help rather than explanation.
+- Do not repeat meaning, origin, or morphology details in coachingText.memoryTip.
 
 Exact output schema:
 ${SPELLING_COACH_OUTPUT_SCHEMA_TEXT}
@@ -263,7 +330,7 @@ export const SPELLING_COACH_SYSTEM_PROMPT = isSpellingRulePromptHintsEnabled()
   : BASE_SYSTEM_PROMPT;
 
 export function buildSpellingCoachPrompt(input: SpellingCoachInput): string {
-  return [
+  const promptParts = [
     "Analyze the spelling attempt and return one JSON object that matches the required schema exactly.",
     "Do not use tools. Do not rely on any external knowledge base. Use only the provided input and safe spelling reasoning.",
     "Follow the schema exactly as already specified in the system instructions.",
@@ -282,11 +349,23 @@ export function buildSpellingCoachPrompt(input: SpellingCoachInput): string {
     ].join(", "),
     "Use CSV hints as sample affix and morpheme families, not as a closed dictionary.",
     "You should still look for similar prefixes, suffixes, and related word parts in the current word when that helps spelling instruction.",
+    ...getMemoryTipPromptGuidance(input.targetWord),
     "Local reference hints from curated Greek/Latin morpheme CSVs:",
     buildReferenceHintsText(input),
     "Input JSON:",
     JSON.stringify(input, null, 2),
-  ].join("\n\n");
+  ];
+
+  if (!isNextStepEnabled()) {
+    promptParts.splice(
+      6,
+      0,
+      "nextStep is disabled right now.",
+      "Return nextStep with practiceFocus as an empty string, shouldReviewSoon as false, and suggestedSimilarWordTypes as an empty array.",
+    );
+  }
+
+  return promptParts.join("\n\n");
 }
 
 export function buildWordTeachingPrecomputePrompt(
@@ -303,6 +382,10 @@ export function buildWordTeachingPrecomputePrompt(
     "For wordBreakdown.displayChunks, you may prefer chunks that preserve blends, digraphs, common endings, or other easy spelling parts, even when they are not strict morphology.",
     "Do not force wordBreakdown.displayChunks to follow roots, prefixes, or suffixes if a simpler spelling-teaching split is better.",
     "If a different meaningful grouping helps with meaning or morphology, explain that separately in conceptTeaching instead of forcing wordBreakdown.displayChunks to match it.",
+    "wordBreakdown.chunkReason must mention the actual chunk boundary, ending, blend, digraph, or spelling pattern that made you choose the chunks.",
+    "Do not use generic filler such as 'easy to say and remember' by itself.",
+    "Do not write a generic chunkReason that could fit any word.",
+    "A good chunkReason names the actual split or pattern, such as '-er ending', 'sh stays together', or 'the word breaks as cent + er'.",
     "Use CSV hints as sample affix and morpheme families, not as a closed dictionary.",
     "You should still look for similar prefixes, suffixes, and related word parts in the current word when that helps spelling instruction.",
     "Local reference hints from curated Greek/Latin morpheme CSVs:",
@@ -318,23 +401,16 @@ export function buildWordTeachingPrecomputePrompt(
       10,
       0,
       "Use the curated spelling-rules CSV as a reference list of common spelling rules and rule labels.",
-      "Use the curated spelling-rules CSV to identify meaningful form patterns present in the word.",
+      "Use the curated spelling-rules CSV to identify meaningful pattern labels only when they help conceptTeaching or conceptLabels.",
       "If pattern_role is rule, treat the entry as a rule-backed spelling pattern when it clearly applies.",
       "If pattern_role is feature, treat the entry as a notable identified pattern in the word.",
       "If pattern_match_type is literal, look for the literal letter pattern in the word.",
       "If pattern_match_type is shape, use the described spelling shape or word structure to judge whether it applies.",
       "Do not choose a rule only because the letter pattern is present in the word.",
       "For sound-based spelling rules, only use the rule when the associated sound or spelling behavior actually matches the word.",
-      "If the letters are present but the sound does not fit the rule, do not include that rule in wordTeaching.formTeaching.patterns.",
-      "In that case, you may still identify the visible letter pattern as a simple feature if that is genuinely helpful.",
+      "If the letters are present but the sound does not fit the rule, do not use that rule label.",
       "Use phonetic spelling or simple sound-by-syllable reasoning internally to check whether a sound-based rule truly matches the word.",
       "Consider syllables, stress, silent letters, and grapheme-to-sound correspondences when deciding whether a sound-based rule applies.",
-      "If you include a spelling rule label in wordTeaching.formTeaching.patterns, the summary, chunkReason, and sayAloudFocus must agree with that rule.",
-      "Do not describe the vowel, consonant, or sound behavior in a way that contradicts the selected rule label.",
-      "Example: if you include i_o_long_before_two_consonants, do not describe the vowel as short.",
-      "Do not introduce morphology, roots, or prefix explanations in formTeaching unless they genuinely help explain the spelling of the word.",
-      "Do not force a prefix, root, or suffix explanation for a simple pattern-based word.",
-      "In wordTeaching.formTeaching.patterns, include applicable rule-backed patterns and applicable identified features from the word.",
       "Also include the same normalized labels in conceptLabels.patternLabels when they clearly apply.",
       "Prefer specific family or rule-backed patterns over broad generic vowel-sound labels when a more explanatory rule exists.",
       "Do not claim a literal pattern rule unless the actual letter pattern appears in the word.",
@@ -348,6 +424,101 @@ export function buildWordTeachingPrecomputePrompt(
   return promptParts.join("\n\n");
 }
 
+export function buildWordTeachingOnlyPrecomputePrompt(
+  input: SpellingCoachInput,
+): string {
+  const promptParts = [
+    "Analyze the word itself and return one JSON object that contains only reusable word teaching fields.",
+    "Do not analyze the child's miss. Do not generate correctness, missAnalysis, errorRelevance, teachingDecision, coachingText, nextStep, or wordBreakdown.",
+    "wordBreakdown chunks are already precomputed and should not be regenerated here.",
+    "Follow the schema exactly as already specified in the system instructions.",
+    "Use the exact top-level keys and nested field names. Do not rename sections.",
+    "Required top-level keys:",
+    ["wordTeaching", "conceptLabels"].join(", "),
+    "Use the provided wordBreakdown as fixed context when it helps conceptTeaching, but do not revise it.",
+    "Do not generate chunk alternatives or chunk selection reasoning here.",
+    "If a different meaningful grouping helps with meaning or morphology, explain that separately in conceptTeaching instead of trying to change wordBreakdown.",
+    "Use CSV hints as sample affix and morpheme families, not as a closed dictionary.",
+    "You should still look for similar prefixes, suffixes, and related word parts in the current word when that helps spelling instruction.",
+    "Local reference hints from curated Greek/Latin morpheme CSVs:",
+    buildReferenceHintsText(input),
+    "Required output schema:",
+    WORD_TEACHING_ONLY_PRECOMPUTE_SCHEMA_TEXT,
+    "Input JSON:",
+    JSON.stringify(input, null, 2),
+  ];
+
+  if (isSpellingRulePromptHintsEnabled()) {
+    promptParts.splice(
+      9,
+      0,
+      "Use the curated spelling-rules CSV as a reference list of common spelling rules and rule labels.",
+      "Use the curated spelling-rules CSV to identify meaningful pattern labels only when they help conceptTeaching or conceptLabels.",
+      "If pattern_role is rule, treat the entry as a rule-backed spelling pattern when it clearly applies.",
+      "If pattern_role is feature, treat the entry as a notable identified pattern in the word.",
+      "If pattern_match_type is literal, look for the literal letter pattern in the word.",
+      "If pattern_match_type is shape, use the described spelling shape or word structure to judge whether it applies.",
+      "Do not choose a rule only because the letter pattern is present in the word.",
+      "For sound-based spelling rules, only use the rule when the associated sound or spelling behavior actually matches the word.",
+      "If the letters are present but the sound does not fit the rule, do not use that rule label.",
+      "Use phonetic spelling or simple sound-by-syllable reasoning internally to check whether a sound-based rule truly matches the word.",
+      "Consider syllables, stress, silent letters, and grapheme-to-sound correspondences when deciding whether a sound-based rule applies.",
+      "Also include the same normalized labels in conceptLabels.patternLabels when they clearly apply.",
+      "Prefer specific family or rule-backed patterns over broad generic vowel-sound labels when a more explanatory rule exists.",
+      "Do not claim a literal pattern rule unless the actual letter pattern appears in the word.",
+      "Keep the explanation child-friendly and concise.",
+      "Do not force rules or features that are weak, uncertain, or not genuinely helpful for this word.",
+      "Curated spelling-rule hints:",
+      buildSpellingRuleHintsText(24, input.targetWord),
+    );
+  }
+
+  return promptParts.join("\n\n");
+}
+
+export function buildWordBreakdownPrecomputePrompt(
+  input: SpellingCoachInput,
+): string {
+  return [
+    "Analyze the word itself and return one JSON object containing only wordBreakdown chunk data.",
+    "This is offline word-breakdown precompute for stored metadata.",
+    "Choose displayChunks that are easiest to say, easiest to remember, and most helpful for spelling this word.",
+    "You may provide up to 2 alternateDisplayChunks only when there are genuinely reasonable alternate teaching chunkings.",
+    "Do not invent weak or noisy alternates.",
+    "If there is only one strong chunking, return alternateDisplayChunks as an empty array.",
+    "Prefer child-friendly spelling chunks such as blends, digraphs, common endings, and syllable-friendly parts when helpful.",
+    "Do not force morphology, roots, prefixes, or suffixes if a simpler spelling-teaching split is better.",
+    "A different meaningful breakdown may exist for concept teaching, but do not optimize displayChunks for morphology here.",
+    "chunkReason must mention the actual chunk split or pattern that supports the chosen displayChunks.",
+    "Do not use generic filler like 'easy to say and remember' by itself.",
+    "Keep chunkReason specific to this word.",
+    "Required output schema:",
+    WORD_BREAKDOWN_PRECOMPUTE_SCHEMA_TEXT,
+    "Input JSON:",
+    JSON.stringify(input, null, 2),
+  ].join("\n\n");
+}
+
+export function buildRelatedFormsOnlyPrecomputePrompt(
+  input: SpellingCoachInput,
+): string {
+  return [
+    "Analyze the word itself and return one JSON object containing only real related forms from the same word family.",
+    "This is offline precompute for related forms only.",
+    "Return only forms that are genuinely in the same family as the target word.",
+    "Good examples include adjective, noun, verb, and closely related family forms such as hypocritical -> hypocrite, hypocrisy.",
+    "Do not invent relatives.",
+    "Do not include loose semantic associations, synonyms, or rhyming words.",
+    "If you are not confident, return an empty array.",
+    "Prefer common dictionary headword-style forms rather than long phrases.",
+    "Do not return the target word itself in relatedForms.",
+    "Required output schema:",
+    RELATED_FORMS_ONLY_PRECOMPUTE_SCHEMA_TEXT,
+    "Input JSON:",
+    JSON.stringify(input, null, 2),
+  ].join("\n\n");
+}
+
 export function buildLevelOnePrecomputePrompt(
   input: SpellingCoachInput,
 ): string {
@@ -357,6 +528,8 @@ export function buildLevelOnePrecomputePrompt(
     "Choose wordBreakdown.displayChunks that are easiest to say and easiest to remember for spelling.",
     "Prefer child-friendly spelling chunks such as blends, digraphs, and common endings when helpful.",
     "Do not force morphology, origin, roots, prefixes, or suffixes.",
+    "wordBreakdown.chunkReason must mention the actual chunk split or spelling pattern that supports the chunks.",
+    "Do not use generic filler like 'easy to say and remember' by itself.",
     "Keep wordTeaching and conceptLabels empty in this Level 1 precompute.",
     "Required top-level keys:",
     ["wordTeaching", "wordBreakdown", "conceptLabels"].join(", "),
@@ -391,7 +564,7 @@ export function buildMissOnlyPrompt(
   input: SpellingCoachInput,
   wordTeachingPrecompute: string,
 ): string {
-  return [
+  const promptParts = [
     "Analyze the child's spelling attempt and return one JSON object that contains only miss-dependent fields.",
     "Do not regenerate wordTeaching, wordBreakdown, or conceptLabels. Those word-level teaching fields are already provided and should be treated as fixed context.",
     "Use the precomputed word-level teaching as support, then focus on correctness, miss analysis, error relevance, teaching decision, coaching text, and next step.",
@@ -406,13 +579,25 @@ export function buildMissOnlyPrompt(
       "coachingText",
       "nextStep",
     ].join(", "),
+    ...getMemoryTipPromptGuidance(input.targetWord),
     "Precomputed word-level teaching JSON:",
     wordTeachingPrecompute,
     "Required output schema:",
     MISS_ONLY_OUTPUT_SCHEMA_TEXT,
     "Input JSON:",
     JSON.stringify(input, null, 2),
-  ].join("\n\n");
+  ];
+
+  if (!isNextStepEnabled()) {
+    promptParts.splice(
+      6,
+      0,
+      "nextStep is disabled right now.",
+      "Return nextStep with practiceFocus as an empty string, shouldReviewSoon as false, and suggestedSimilarWordTypes as an empty array.",
+    );
+  }
+
+  return promptParts.join("\n\n");
 }
 
 export function buildLevelOneCoachingPrompt(input: SpellingCoachInput): string {
