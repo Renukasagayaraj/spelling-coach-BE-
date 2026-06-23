@@ -194,3 +194,103 @@ export async function updateUserProfileInDB(
   return data;
 }
 
+/**
+ * Start a new practice session in the DB.
+ */
+export async function startPracticeSessionInDB(
+  authToken: string,
+  userId: string,
+  mode: string,
+) {
+  const userClient = getSupabaseUserClient(authToken);
+  const { data, error } = await userClient
+    .from("practice_sessions")
+    .insert({
+      user_id: userId,
+      mode,
+      session_started_at: new Date().toISOString(),
+    })
+    .select("id")
+    .single();
+
+  if (error) {
+    throw error;
+  }
+  return data.id as string;
+}
+
+export async function recordWordAttemptInDB(
+  authToken: string,
+  userId: string,
+  sessionId: string,
+  targetWord: string,
+  childAttempt: string,
+  isCorrect: boolean,
+  attemptNumber: number,
+  level?: number,
+  definitionViewed?: boolean,
+  exampleViewed?: boolean,
+  originViewed?: boolean,
+  partOfSpeechViewed?: boolean,
+  repeatWordCount?: number,
+  usedVoiceInput?: boolean,
+) {
+  const userClient = getSupabaseUserClient(authToken);
+  const { data, error } = await userClient
+    .from("word_attempts")
+    .insert({
+      session_id: sessionId,
+      user_id: userId,
+      target_word: targetWord,
+      child_attempt: childAttempt,
+      is_correct: isCorrect,
+      attempt_number: attemptNumber,
+      level,
+      definition_viewed: definitionViewed,
+      example_viewed: exampleViewed,
+      origin_viewed: originViewed,
+      part_of_speech_viewed: partOfSpeechViewed,
+      repeat_word_count: repeatWordCount || 0,
+      used_voice_input: usedVoiceInput,
+    })
+    .select("id")
+    .single();
+
+  if (error) {
+    throw error;
+  }
+  return data.id as string;
+}
+
+/**
+ * End a practice session in the DB.
+ */
+export async function endPracticeSessionInDB(
+  authToken: string,
+  userId: string,
+  sessionId: string,
+  totalWordsAttempted: number,
+  totalCorrect: number,
+  durationSeconds: number,
+) {
+  const userClient = getSupabaseUserClient(authToken);
+  const accuracyPercentage = totalWordsAttempted > 0 ? (totalCorrect / totalWordsAttempted) * 100 : 0;
+  
+  const { error } = await userClient
+    .from("practice_sessions")
+    .update({
+      session_ended_at: new Date().toISOString(),
+      total_words_attempted: totalWordsAttempted,
+      total_correct: totalCorrect,
+      accuracy_percentage: accuracyPercentage,
+      duration_seconds: durationSeconds,
+    })
+    .eq("id", sessionId)
+    .eq("user_id", userId);
+
+  if (error) {
+    throw error;
+  }
+}
+
+
