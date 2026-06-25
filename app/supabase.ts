@@ -354,7 +354,7 @@ export async function endPracticeSessionInDB(
   durationSeconds: number,
 ) {
   const userClient = getSupabaseUserClient(authToken);
-  
+
   const { error } = await userClient
     .from("practice_sessions")
     .update({
@@ -370,5 +370,25 @@ export async function endPracticeSessionInDB(
     throw error;
   }
 }
+
+/**
+ * Fetch all statistics for a user.
+ */
+export async function getUserStatisticsInDB(
+  authToken: string,
+  userId: string,
+) {
+  const userClient = getSupabaseUserClient(authToken);
+  const { data, error } = await userClient
+    .from("user_statistics")
+    .select("level, current_streak, best_streak, total_attempts, mastered_words, badges, total_sessions")
+    .eq("user_id", userId);
+
+  if (error) {
+    throw error;
+  }
+  return data;
+}
+
 
 
