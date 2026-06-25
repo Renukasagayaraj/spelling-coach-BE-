@@ -217,11 +217,21 @@ export async function startPracticeSessionInDB(
     throw error;
   }
 
+  // Parse level from mode (e.g. "standard_level_2" -> level 2)
+  let level = 1;
+  if (mode.startsWith("standard_level_")) {
+    const parsed = parseInt(mode.replace("standard_level_", ""), 10);
+    if (!isNaN(parsed)) {
+      level = parsed;
+    }
+  }
+
   // Update total_sessions in user_statistics
   const { data: stats } = await userClient
     .from("user_statistics")
     .select("total_sessions")
     .eq("user_id", userId)
+    .eq("level", level)
     .maybeSingle();
 
   const nextSessions = (stats?.total_sessions || 0) + 1;
@@ -230,10 +240,11 @@ export async function startPracticeSessionInDB(
     .from("user_statistics")
     .upsert({
       user_id: userId,
+      level: level,
       total_sessions: nextSessions,
       last_practice_date: new Date().toISOString(),
     }, {
-      onConflict: "user_id"
+      onConflict: "user_id,level"
     });
 
   if (statsError) {
@@ -282,11 +293,13 @@ export async function recordWordAttemptInDB(
     throw error;
   }
 
-  // Fetch current user_statistics
+  // Fetch current user_statistics for the specific level
+  const currentLevel = level || 1;
   const { data: stats } = await userClient
     .from("user_statistics")
     .select("current_streak, best_streak, total_attempts, mastered_words")
     .eq("user_id", userId)
+    .eq("level", currentLevel)
     .maybeSingle();
 
   const currentStreak = stats ? (stats.current_streak || 0) : 0;
@@ -311,6 +324,7 @@ export async function recordWordAttemptInDB(
     .from("user_statistics")
     .upsert({
       user_id: userId,
+      level: currentLevel,
       total_attempts: nextAttempts,
       mastered_words: nextMasteredWords,
       current_streak: nextStreak,
@@ -318,7 +332,7 @@ export async function recordWordAttemptInDB(
       badges: badges,
       last_practice_date: new Date().toISOString(),
     }, {
-      onConflict: "user_id"
+      onConflict: "user_id,level"
     });
 
   if (statsError) {
@@ -340,7 +354,6 @@ export async function endPracticeSessionInDB(
   durationSeconds: number,
 ) {
   const userClient = getSupabaseUserClient(authToken);
-  const accuracyPercentage = totalWordsAttempted > 0 ? (totalCorrect / totalWordsAttempted) * 100 : 0;
   
   const { error } = await userClient
     .from("practice_sessions")
@@ -348,7 +361,6 @@ export async function endPracticeSessionInDB(
       session_ended_at: new Date().toISOString(),
       total_words_attempted: totalWordsAttempted,
       total_correct: totalCorrect,
-      accuracy_percentage: accuracyPercentage,
       duration_seconds: durationSeconds,
     })
     .eq("id", sessionId)
