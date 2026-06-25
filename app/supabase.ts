@@ -216,6 +216,30 @@ export async function startPracticeSessionInDB(
   if (error) {
     throw error;
   }
+
+  // Update total_sessions in user_statistics
+  const { data: stats } = await userClient
+    .from("user_statistics")
+    .select("total_sessions")
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  const nextSessions = (stats?.total_sessions || 0) + 1;
+
+  const { error: statsError } = await userClient
+    .from("user_statistics")
+    .upsert({
+      user_id: userId,
+      total_sessions: nextSessions,
+      last_practice_date: new Date().toISOString(),
+    }, {
+      onConflict: "user_id"
+    });
+
+  if (statsError) {
+    console.error("Failed to update total_sessions in user_statistics:", statsError);
+  }
+
   return data.id as string;
 }
 
@@ -257,6 +281,50 @@ export async function recordWordAttemptInDB(
   if (error) {
     throw error;
   }
+
+  // Fetch current user_statistics
+  const { data: stats } = await userClient
+    .from("user_statistics")
+    .select("current_streak, best_streak, total_attempts, mastered_words")
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  const currentStreak = stats ? (stats.current_streak || 0) : 0;
+  const bestStreak = stats ? (stats.best_streak || 0) : 0;
+  const totalAttempts = stats ? (stats.total_attempts || 0) : 0;
+  const masteredWords = stats ? (stats.mastered_words || 0) : 0;
+
+  const nextStreak = isCorrect ? currentStreak + 1 : 0;
+  const nextBestStreak = Math.max(bestStreak, nextStreak);
+  const nextAttempts = totalAttempts + 1;
+  const nextMasteredWords = isCorrect ? masteredWords + 1 : masteredWords;
+
+  // Calculate earned badges based on stats rules
+  const badges: string[] = [];
+  if (nextBestStreak >= 3) badges.push("streak3");
+  if (nextBestStreak >= 5) badges.push("streak5");
+  if (nextBestStreak >= 10) badges.push("streak10");
+  if (nextMasteredWords >= 25) badges.push("total25");
+  if (nextMasteredWords >= 50) badges.push("total50");
+
+  const { error: statsError } = await userClient
+    .from("user_statistics")
+    .upsert({
+      user_id: userId,
+      total_attempts: nextAttempts,
+      mastered_words: nextMasteredWords,
+      current_streak: nextStreak,
+      best_streak: nextBestStreak,
+      badges: badges,
+      last_practice_date: new Date().toISOString(),
+    }, {
+      onConflict: "user_id"
+    });
+
+  if (statsError) {
+    console.error("Failed to update user_statistics:", statsError);
+  }
+
   return data.id as string;
 }
 
