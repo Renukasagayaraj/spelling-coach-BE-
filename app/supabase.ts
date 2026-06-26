@@ -203,6 +203,21 @@ export async function startPracticeSessionInDB(
   mode: string,
 ) {
   const userClient = getSupabaseUserClient(authToken);
+
+  // Check if there is an existing session for this user and mode
+  const { data: existingSession } = await userClient
+    .from("practice_sessions")
+    .select("id")
+    .eq("user_id", userId)
+    .eq("mode", mode)
+    .order("session_started_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (existingSession) {
+    return existingSession.id;
+  }
+
   const { data, error } = await userClient
     .from("practice_sessions")
     .insert({
@@ -291,6 +306,25 @@ export async function recordWordAttemptInDB(
 
   if (error) {
     throw error;
+  }
+
+  // Update practice_sessions table in real-time
+  const { data: sessionData } = await userClient
+    .from("practice_sessions")
+    .select("total_words_attempted, total_correct")
+    .eq("id", sessionId)
+    .maybeSingle();
+
+  if (sessionData) {
+    const nextWords = (sessionData.total_words_attempted || 0) + 1;
+    const nextCorrect = (sessionData.total_correct || 0) + (isCorrect ? 1 : 0);
+    await userClient
+      .from("practice_sessions")
+      .update({
+        total_words_attempted: nextWords,
+        total_correct: nextCorrect,
+      })
+      .eq("id", sessionId);
   }
 
   // Fetch current user_statistics for the specific level
@@ -389,6 +423,29 @@ export async function getUserStatisticsInDB(
   }
   return data;
 }
+
+/**
+ * Fetch all word attempts for a specific practice session.
+ */
+export async function getSessionAttemptsFromDB(
+  authToken: string,
+  userId: string,
+  sessionId: string,
+) {
+  const userClient = getSupabaseUserClient(authToken);
+  const { data, error } = await userClient
+    .from("word_attempts")
+    .select("*")
+    .eq("session_id", sessionId)
+    .eq("user_id", userId)
+    .order("created_at", { ascending: true });
+
+  if (error) {
+    throw error;
+  }
+  return data;
+}
+
 
 
 

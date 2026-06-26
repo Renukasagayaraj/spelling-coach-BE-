@@ -15,6 +15,7 @@ import {
   recordWordAttemptInDB,
   endPracticeSessionInDB,
   getUserStatisticsInDB,
+  getSessionAttemptsFromDB,
 } from "./supabase.js";
 import {
   buildSpellingCoachInput,
@@ -283,6 +284,26 @@ export default async function handler(
       const authHeader = request.headers.authorization || "";
       const stats = await getUserStatisticsInDB(authHeader, user.id);
       sendJson(response, 200, { stats });
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/sessions/attempts") {
+      const user = await authenticateRequest(request);
+      const authHeader = request.headers.authorization || "";
+      const sessionId = url.searchParams.get("sessionId");
+      if (!sessionId) {
+        sendJson(response, 400, { error: "Missing sessionId query parameter" });
+        return;
+      }
+      const attempts = await getSessionAttemptsFromDB(authHeader, user.id, sessionId);
+      const enrichedAttempts = attempts.map((att) => {
+        const wordCatalogEntry = getWordByText(att.target_word);
+        return {
+          ...att,
+          word_catalog_entry: wordCatalogEntry ? buildWordResponse(wordCatalogEntry) : null,
+        };
+      });
+      sendJson(response, 200, { attempts: enrichedAttempts });
       return;
     }
 
