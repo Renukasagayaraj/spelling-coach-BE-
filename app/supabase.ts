@@ -241,30 +241,7 @@ export async function startPracticeSessionInDB(
     }
   }
 
-  // Update total_sessions in user_statistics
-  const { data: stats } = await userClient
-    .from("user_statistics")
-    .select("total_sessions")
-    .eq("user_id", userId)
-    .eq("level", level)
-    .maybeSingle();
 
-  const nextSessions = (stats?.total_sessions || 0) + 1;
-
-  const { error: statsError } = await userClient
-    .from("user_statistics")
-    .upsert({
-      user_id: userId,
-      level: level,
-      total_sessions: nextSessions,
-      last_practice_date: new Date().toISOString(),
-    }, {
-      onConflict: "user_id,level"
-    });
-
-  if (statsError) {
-    console.error("Failed to update total_sessions in user_statistics:", statsError);
-  }
 
   return data.id as string;
 }
@@ -364,7 +341,6 @@ export async function recordWordAttemptInDB(
       current_streak: nextStreak,
       best_streak: nextBestStreak,
       badges: badges,
-      last_practice_date: new Date().toISOString(),
     }, {
       onConflict: "user_id,level"
     });
@@ -415,7 +391,7 @@ export async function getUserStatisticsInDB(
   const userClient = getSupabaseUserClient(authToken);
   const { data, error } = await userClient
     .from("user_statistics")
-    .select("level, current_streak, best_streak, total_attempts, mastered_words, badges, total_sessions")
+    .select("level, current_streak, best_streak, total_attempts, mastered_words, badges")
     .eq("user_id", userId);
 
   if (error) {
