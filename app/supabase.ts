@@ -316,7 +316,7 @@ export async function recordWordAttemptInDB(
   }
 
   // Fetch current user_statistics for the specific level
-  const currentLevel = level || 1;
+  const currentLevel = level !== undefined ? level : 1;
   const { data: stats } = await userClient
     .from("user_statistics")
     .select("current_streak, best_streak, total_attempts, mastered_words")

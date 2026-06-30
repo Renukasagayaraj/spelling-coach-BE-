@@ -232,7 +232,7 @@ export default async function handler(
         user?.id,
         customWordsFallback,
       );
-      const precomputeInput = buildWordPrecomputeInput(word.word);
+      const precomputeInput = buildWordPrecomputeInput(word);
       const precomputeStart = performance.now();
       void warmWordTeachingPrecompute(precomputeInput)
         .then(() => {
@@ -469,10 +469,28 @@ export default async function handler(
         return;
       }
 
-      const wordEntry = getWordByText(word);
+      let wordEntry = getWordByText(word);
       if (!wordEntry) {
-        sendJson(response, 404, { error: `Unknown word: ${word}` });
-        return;
+        const isValidWord = /^[a-zA-Z\s-]+$/.test(word);
+
+        if (isValidWord) {
+          wordEntry = {
+            word: word,
+            level: "custom",
+            grade_band: "custom",
+            difficulty: "custom",
+            origin: "",
+            definition: "",
+            example_sentence: "",
+            patterns: [],
+            common_mistakes: [],
+            coach_tip: "",
+            part_of_speech: "noun",
+          };
+        } else {
+          sendJson(response, 404, { error: `Unknown word: ${word}` });
+          return;
+        }
       }
 
       const audio = await generatePronunciationAudio(wordEntry.word);
