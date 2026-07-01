@@ -271,6 +271,7 @@ export async function recordWordAttemptInDB(
   partOfSpeechViewed?: boolean,
   repeatWordCount?: number,
   usedVoiceInput?: boolean,
+  mode: string = "standard",
 ) {
   const userClient = getSupabaseUserClient(authToken);
   const { data, error } = await userClient
@@ -315,14 +316,21 @@ export async function recordWordAttemptInDB(
       .eq("id", sessionId);
   }
 
-  // Fetch current user_statistics for the specific level
-  const currentLevel = level !== undefined ? level : 1;
-  const { data: stats } = await userClient
+  // Fetch current user_statistics for the specific mode/level
+  const currentLevel = mode === "standard" ? (level !== undefined ? level : 1) : null;
+  const query = userClient
     .from("user_statistics")
     .select("current_streak, best_streak, total_attempts, mastered_words")
     .eq("user_id", userId)
-    .eq("level", currentLevel)
-    .maybeSingle();
+    .eq("mode", mode);
+
+  if (currentLevel !== null) {
+    query.eq("level", currentLevel);
+  } else {
+    query.is("level", null);
+  }
+
+  const { data: stats } = await query.maybeSingle();
 
   const currentStreak = stats ? (stats.current_streak || 0) : 0;
   const bestStreak = stats ? (stats.best_streak || 0) : 0;
@@ -346,14 +354,16 @@ export async function recordWordAttemptInDB(
     .from("user_statistics")
     .upsert({
       user_id: userId,
+      mode: mode,
       level: currentLevel,
       total_attempts: nextAttempts,
       mastered_words: nextMasteredWords,
       current_streak: nextStreak,
       best_streak: nextBestStreak,
       badges: badges,
+      updated_at: new Date().toISOString(),
     }, {
-      onConflict: "user_id,level"
+      onConflict: "user_id,mode,level"
     });
 
   if (statsError) {
@@ -402,7 +412,7 @@ export async function getUserStatisticsInDB(
   const userClient = getSupabaseUserClient(authToken);
   const { data, error } = await userClient
     .from("user_statistics")
-    .select("level, current_streak, best_streak, total_attempts, mastered_words, badges")
+    .select("level, mode, current_streak, best_streak, total_attempts, mastered_words, badges")
     .eq("user_id", userId);
 
   if (error) {
