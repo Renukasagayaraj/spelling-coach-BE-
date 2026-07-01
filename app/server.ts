@@ -77,7 +77,7 @@ function sendJson(response: import("node:http").ServerResponse, statusCode: numb
     "Content-Type": "application/json; charset=utf-8",
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, x-audio-filename",
   });
   response.end(`${JSON.stringify(body, null, 2)}\n`);
 }
@@ -93,7 +93,7 @@ function sendAudio(
     "Cache-Control": "public, max-age=3600",
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, x-audio-filename",
   });
   response.end(Buffer.from(audio));
 }
