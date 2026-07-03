@@ -16,6 +16,8 @@ import {
   endPracticeSessionInDB,
   getUserStatisticsInDB,
   getSessionAttemptsFromDB,
+  getUserSubscriptionFromDB,
+  updateUserSubscriptionInDB,
 } from "./supabase.js";
 import {
   buildSpellingCoachInput,
@@ -709,11 +711,38 @@ export default async function handler(
       url.pathname === "/api/stripe/subscription-status"
     ) {
       const user = await authenticateRequest(request);
+      const authHeader = request.headers.authorization || "";
+
       if (!user.email) {
         sendJson(response, 200, { subscribed: false });
         return;
       }
 
+      // 1. Try to read from the database first
+      try {
+        const cachedSub = await getUserSubscriptionFromDB(authHeader, user.id);
+        if (cachedSub) {
+          const status = cachedSub.status;
+          const currentPeriodEnd = cachedSub.current_period_end;
+          
+          if ((status === "active" || status === "trialing") && currentPeriodEnd) {
+            const expiryTime = new Date(currentPeriodEnd).getTime();
+            // If the subscription is active and has more than 10 minutes left
+            if (expiryTime > Date.now() + 10 * 60 * 1000) {
+              sendJson(response, 200, {
+                subscribed: true,
+                currentPeriodEnd: Math.floor(expiryTime / 1000),
+                cancelAtPeriodEnd: cachedSub.cancel_at_period_end || false,
+              });
+              return;
+            }
+          }
+        }
+      } catch (err) {
+        logError("Failed to fetch subscription from DB:", err);
+      }
+
+      // 2. Fall back to live Stripe query if not in DB or expired/inactive
       if (!process.env.STRIPE_SECRET_KEY) {
         sendJson(response, 500, { error: "STRIPE_SECRET_KEY is not configured on the server." });
         return;
@@ -726,12 +755,24 @@ export default async function handler(
       });
 
       if (customers.data.length === 0) {
+        try {
+          await updateUserSubscriptionInDB(authHeader, user.id, {
+            stripeCustomerId: null,
+            stripeSubscriptionId: null,
+            status: "inactive",
+            currentPeriodEnd: null,
+            cancelAtPeriodEnd: false,
+          });
+        } catch (err) {
+          logError("Failed to update subscription in DB:", err);
+        }
         sendJson(response, 200, { subscribed: false });
         return;
       }
 
+      const stripeCustomerId = customers.data[0].id;
       const subscriptions = await stripe.subscriptions.list({
-        customer: customers.data[0].id,
+        customer: stripeCustomerId,
         status: "active",
         limit: 1,
       });
@@ -739,12 +780,39 @@ export default async function handler(
       if (subscriptions.data.length > 0) {
         const sub = subscriptions.data[0] as any;
         const periodEnd = sub.current_period_end || sub.items?.data?.[0]?.current_period_end || sub.billing_cycle_anchor;
+        const cancelAtPeriodEnd = sub.cancel_at_period_end || false;
+        const stripeSubscriptionId = sub.id;
+        const status = sub.status || "active";
+
+        try {
+          await updateUserSubscriptionInDB(authHeader, user.id, {
+            stripeCustomerId,
+            stripeSubscriptionId,
+            status,
+            currentPeriodEnd: new Date(periodEnd * 1000).toISOString(),
+            cancelAtPeriodEnd,
+          });
+        } catch (err) {
+          logError("Failed to update subscription in DB:", err);
+        }
+
         sendJson(response, 200, {
           subscribed: true,
           currentPeriodEnd: periodEnd,
-          cancelAtPeriodEnd: sub.cancel_at_period_end,
+          cancelAtPeriodEnd,
         });
       } else {
+        try {
+          await updateUserSubscriptionInDB(authHeader, user.id, {
+            stripeCustomerId,
+            stripeSubscriptionId: null,
+            status: "inactive",
+            currentPeriodEnd: null,
+            cancelAtPeriodEnd: false,
+          });
+        } catch (err) {
+          logError("Failed to update subscription in DB:", err);
+        }
         sendJson(response, 200, { subscribed: false });
       }
       return;
