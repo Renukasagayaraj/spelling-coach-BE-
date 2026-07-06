@@ -1,4 +1,5 @@
 import { getOpenAIClient } from "./openaiClient.js";
+import { getWordByText } from "./wordCatalog.js";
 
 const DEFAULT_TTS_MODEL = "gpt-4o-mini-tts";
 const DEFAULT_TTS_VOICE = "alloy";
@@ -13,6 +14,43 @@ function isTtsInstructionEnabled(): boolean {
   return process.env.SPELLING_COACH_TTS_INSTRUCTIONS === "on";
 }
 
+function extractTargetWord(text: string): string | null {
+  const match = text.trim().match(/^spell this word:\s*(.+?)\.?$/i);
+  return match?.[1]?.trim() ?? null;
+}
+
+function isRiskyPronunciationWord(word: string): boolean {
+  const normalized = word.trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+
+  return (
+    !/[aeiou]/.test(normalized) ||
+    /[bcdfghjklmnpqrstvwxyz]{4,}/.test(normalized) ||
+    normalized.startsWith("xyl") ||
+    normalized.startsWith("syz") ||
+    normalized.startsWith("pt") ||
+    normalized.startsWith("ps") ||
+    normalized.startsWith("mn") ||
+    normalized.startsWith("pn") ||
+    normalized.startsWith("cz") ||
+    normalized.startsWith("yt") ||
+    normalized.startsWith("phth") ||
+    ((normalized.match(/y/g) ?? []).length >= 2 && !/[aeiou]/.test(normalized))
+  );
+}
+
+function getFriendlyPronunciationForWord(word: string): string | null {
+  const entry = getWordByText(word);
+  const chunks = entry?.phoneme_metadata?.friendly_chunks ?? [];
+  if (chunks.length === 0) {
+    return null;
+  }
+
+  return chunks.join("-");
+}
+
 function buildCacheKey(text: string, voice: string, instructions?: string): string {
   return [text.toLowerCase(), voice, instructions ?? ""].join("|");
 }
@@ -22,8 +60,17 @@ export function buildDefaultTtsInstructions(text: string): string | undefined {
     return undefined;
   }
 
-  if (/^spell this word:/i.test(text.trim())) {
-    return "Read the provided text exactly. Do not omit the target word. Say the word once clearly and naturally.";
+  const targetWord = extractTargetWord(text);
+  if (targetWord) {
+    const baseInstruction =
+      "Read the provided text exactly. Do not omit the target word. Pronounce the target word as a spoken word. Do not spell letters. Do not read it character by character. Say the word once clearly and naturally.";
+    const friendlyPronunciation = getFriendlyPronunciationForWord(targetWord);
+
+    if (friendlyPronunciation && isRiskyPronunciationWord(targetWord)) {
+      return `${baseInstruction} Pronounce ${targetWord} as ${friendlyPronunciation}.`;
+    }
+
+    return baseInstruction;
   }
 
   return undefined;

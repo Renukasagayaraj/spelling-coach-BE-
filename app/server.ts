@@ -9,18 +9,10 @@ import {
   fetchCustomListsFromDB,
   fetchCustomListByIdFromDB,
   saveCustomListToDB,
-  fetchUserProfileFromDB,
-  updateUserProfileInDB,
-  startPracticeSessionInDB,
-  recordWordAttemptInDB,
-  endPracticeSessionInDB,
-  getUserStatisticsInDB,
-  getSessionAttemptsFromDB,
-  getUserSubscriptionFromDB,
-  updateUserSubscriptionInDB,
 } from "./supabase.js";
 import {
   buildSpellingCoachInput,
+  buildWordPrecomputeInputFromWordEntry,
   buildWordPrecomputeInput,
   buildWordResponse,
   CoachingRequestSchema,
@@ -42,6 +34,7 @@ import {
 } from "./referenceData.js";
 import { runSpellingCoachAgent } from "./runAgent.js";
 import { recordSpellingCoachTrace, recordImportListTrace } from "./langfuse.js";
+import { InMemoryMockBeeSessionStore, MockBeeService } from "./mockBee.js";
 import {
   getCustomWordListById,
   getForeignOriginWordListByOrigin,
@@ -73,13 +66,14 @@ function getStripe(): Stripe {
 }
 
 const PORT = Number(process.env.PORT ?? 3000);
+const mockBeeService = new MockBeeService(new InMemoryMockBeeSessionStore());
 
 function sendJson(response: import("node:http").ServerResponse, statusCode: number, body: unknown) {
   response.writeHead(statusCode, {
     "Content-Type": "application/json; charset=utf-8",
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, x-audio-filename",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
   });
   response.end(`${JSON.stringify(body, null, 2)}\n`);
 }
@@ -88,14 +82,17 @@ function sendAudio(
   response: import("node:http").ServerResponse,
   statusCode: number,
   audio: Uint8Array,
+  options: {
+    cacheControl?: string;
+  } = {},
 ): void {
   response.writeHead(statusCode, {
     "Content-Type": "audio/mpeg",
     "Content-Length": audio.byteLength,
-    "Cache-Control": "public, max-age=3600",
+    "Cache-Control": options.cacheControl ?? "public, max-age=3600",
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, x-audio-filename",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
   });
   response.end(Buffer.from(audio));
 }
@@ -234,7 +231,7 @@ export default async function handler(
         user?.id,
         customWordsFallback,
       );
-      const precomputeInput = buildWordPrecomputeInput(word);
+      const precomputeInput = buildWordPrecomputeInputFromWordEntry(word);
       const precomputeStart = performance.now();
       void warmWordTeachingPrecompute(precomputeInput)
         .then(() => {
@@ -249,6 +246,123 @@ export default async function handler(
       return;
     }
 
+    if (request.method === "POST" && url.pathname === "/api/mock-bee/sessions") {
+      const rawBody = await collectBody(request);
+      const requestBody = JSON.parse(rawBody);
+      let ownerUserId: string | undefined;
+      let customWordsFallback: Awaited<ReturnType<typeof fetchCustomListByIdFromDB>>["words"] | undefined;
+
+      if (requestBody.wordSource === "custom_list") {
+        const user = await authenticateRequest(request);
+        const authHeader = request.headers.authorization || "";
+        const customListId = String(requestBody.customListId ?? "");
+        const dbList = await fetchCustomListByIdFromDB(authHeader, customListId, user.id);
+        if (!dbList) {
+          sendJson(response, 404, {
+            error: `Unknown custom list: ${customListId}`,
+          });
+          return;
+        }
+        ownerUserId = user.id;
+        customWordsFallback = dbList.words;
+      }
+
+      const session = await mockBeeService.createSession(requestBody, {
+        ownerUserId,
+        customWordsFallback,
+      });
+      sendJson(response, 200, { session });
+      return;
+    }
+
+    if (
+      url.pathname.startsWith("/api/mock-bee/sessions/") &&
+      request.method === "GET"
+    ) {
+      const parts = url.pathname.split("/").filter(Boolean);
+      const sessionId = decodeURIComponent(parts[3] ?? "");
+      const tail = parts.slice(4);
+
+      if (!sessionId) {
+        sendJson(response, 400, { error: "Mock bee session id is required." });
+        return;
+      }
+
+      const session = await mockBeeService.getInternalSession(sessionId);
+      if (session.ownerUserId) {
+        const user = await authenticateRequest(request);
+        if (user.id !== session.ownerUserId) {
+          sendJson(response, 403, { error: "Forbidden." });
+          return;
+        }
+      }
+
+      if (tail.length === 0) {
+        sendJson(response, 200, { session: await mockBeeService.getSession(sessionId) });
+        return;
+      }
+
+      if (tail[0] === "review") {
+        sendJson(response, 200, { review: await mockBeeService.getReview(sessionId) });
+        return;
+      }
+
+      if (tail[0] === "current-word" && tail[1] === "pronunciation") {
+        if (session.status !== "active") {
+          sendJson(response, 409, { error: "Mock bee session is already completed." });
+          return;
+        }
+
+        const word = session.turns[session.currentTurnIndex]?.word;
+        if (!word) {
+          sendJson(response, 404, { error: "Current mock bee word not found." });
+          return;
+        }
+
+        const audio = await generatePronunciationAudio(word.word);
+        sendAudio(response, 200, audio, {
+          cacheControl: "no-store, max-age=0",
+        });
+        return;
+      }
+    }
+
+    if (
+      url.pathname.startsWith("/api/mock-bee/sessions/") &&
+      request.method === "POST"
+    ) {
+      const parts = url.pathname.split("/").filter(Boolean);
+      const sessionId = decodeURIComponent(parts[3] ?? "");
+      const tail = parts.slice(4);
+
+      if (!sessionId) {
+        sendJson(response, 400, { error: "Mock bee session id is required." });
+        return;
+      }
+
+      const session = await mockBeeService.getInternalSession(sessionId);
+      if (session.ownerUserId) {
+        const user = await authenticateRequest(request);
+        if (user.id !== session.ownerUserId) {
+          sendJson(response, 403, { error: "Forbidden." });
+          return;
+        }
+      }
+
+      if (tail[0] === "submit") {
+        const rawBody = await collectBody(request);
+        const result = await mockBeeService.submitAttempt(sessionId, JSON.parse(rawBody));
+        sendJson(response, 200, result);
+        return;
+      }
+
+      if (tail[0] === "timeout") {
+        const result = await mockBeeService.timeoutCurrentWord(sessionId);
+        sendJson(response, 200, result);
+        return;
+      }
+    }
+
     if (request.method === "GET" && url.pathname === "/api/custom-lists") {
       const user = await authenticateRequest(request);
       const authHeader = request.headers.authorization || "";
@@ -260,123 +374,6 @@ export default async function handler(
     if (request.method === "GET" && url.pathname === "/api/auth/me") {
       const user = await authenticateRequest(request);
       sendJson(response, 200, { user });
-      return;
-    }
-
-    if (request.method === "GET" && url.pathname === "/api/users/profile") {
-      const user = await authenticateRequest(request);
-      const authHeader = request.headers.authorization || "";
-      const profile = await fetchUserProfileFromDB(authHeader, user.id, user.email);
-      sendJson(response, 200, { profile });
-      return;
-    }
-
-    if (request.method === "POST" && url.pathname === "/api/users/profile") {
-      const user = await authenticateRequest(request);
-      const authHeader = request.headers.authorization || "";
-      const rawBody = await collectBody(request);
-      const updates = JSON.parse(rawBody);
-      const profile = await updateUserProfileInDB(authHeader, user.id, updates);
-      sendJson(response, 200, { profile });
-      return;
-    }
-
-    if (request.method === "GET" && url.pathname === "/api/users/stats") {
-      const user = await authenticateRequest(request);
-      const authHeader = request.headers.authorization || "";
-      const stats = await getUserStatisticsInDB(authHeader, user.id);
-      sendJson(response, 200, { stats });
-      return;
-    }
-
-    if (request.method === "GET" && url.pathname === "/api/sessions/attempts") {
-      const user = await authenticateRequest(request);
-      const authHeader = request.headers.authorization || "";
-      const sessionId = url.searchParams.get("sessionId");
-      if (!sessionId) {
-        sendJson(response, 400, { error: "Missing sessionId query parameter" });
-        return;
-      }
-      const attempts = await getSessionAttemptsFromDB(authHeader, user.id, sessionId);
-      const enrichedAttempts = attempts.map((att) => {
-        const wordCatalogEntry = getWordByText(att.target_word);
-        return {
-          ...att,
-          word_catalog_entry: wordCatalogEntry ? buildWordResponse(wordCatalogEntry) : null,
-        };
-      });
-      sendJson(response, 200, { attempts: enrichedAttempts });
-      return;
-    }
-
-    if (request.method === "POST" && url.pathname === "/api/sessions/start") {
-      const user = await authenticateRequest(request);
-      const authHeader = request.headers.authorization || "";
-      const rawBody = await collectBody(request);
-      const { mode } = JSON.parse(rawBody);
-      const sessionId = await startPracticeSessionInDB(authHeader, user.id, mode);
-      sendJson(response, 200, { sessionId });
-      return;
-    }
-
-    if (request.method === "POST" && url.pathname === "/api/sessions/attempts") {
-      const user = await authenticateRequest(request);
-      const authHeader = request.headers.authorization || "";
-      const rawBody = await collectBody(request);
-      const {
-        sessionId,
-        targetWord,
-        childAttempt,
-        isCorrect,
-        level,
-        definitionViewed,
-        exampleViewed,
-        originViewed,
-        partOfSpeechViewed,
-        repeatWordCount,
-        usedVoiceInput,
-        mode,
-        coachingResponse,
-      } = JSON.parse(rawBody);
-
-      const attemptId = await recordWordAttemptInDB(
-        authHeader,
-        user.id,
-        sessionId,
-        targetWord,
-        childAttempt,
-        isCorrect,
-        level,
-        definitionViewed,
-        exampleViewed,
-        originViewed,
-        partOfSpeechViewed,
-        repeatWordCount,
-        usedVoiceInput,
-        mode || "standard",
-        coachingResponse,
-      );
-
-      sendJson(response, 200, { attemptId });
-      return;
-    }
-
-    if (request.method === "POST" && url.pathname === "/api/sessions/end") {
-      const user = await authenticateRequest(request);
-      const authHeader = request.headers.authorization || "";
-      const rawBody = await collectBody(request);
-      const { sessionId, totalWordsAttempted, totalCorrect, durationSeconds } = JSON.parse(rawBody);
-
-      await endPracticeSessionInDB(
-        authHeader,
-        user.id,
-        sessionId,
-        totalWordsAttempted || 0,
-        totalCorrect || 0,
-        durationSeconds || 0,
-      );
-
-      sendJson(response, 200, { success: true });
       return;
     }
 
@@ -475,28 +472,10 @@ export default async function handler(
         return;
       }
 
-      let wordEntry = getWordByText(word);
+      const wordEntry = getWordByText(word);
       if (!wordEntry) {
-        const isValidWord = /^[a-zA-Z\s-]+$/.test(word);
-
-        if (isValidWord) {
-          wordEntry = {
-            word: word,
-            level: "custom",
-            grade_band: "custom",
-            difficulty: "custom",
-            origin: "",
-            definition: "",
-            example_sentence: "",
-            patterns: [],
-            common_mistakes: [],
-            coach_tip: "",
-            part_of_speech: "noun",
-          };
-        } else {
-          sendJson(response, 404, { error: `Unknown word: ${word}` });
-          return;
-        }
+        sendJson(response, 404, { error: `Unknown word: ${word}` });
+        return;
       }
 
       const audio = await generatePronunciationAudio(wordEntry.word);
@@ -711,38 +690,11 @@ export default async function handler(
       url.pathname === "/api/stripe/subscription-status"
     ) {
       const user = await authenticateRequest(request);
-      const authHeader = request.headers.authorization || "";
-
       if (!user.email) {
         sendJson(response, 200, { subscribed: false });
         return;
       }
 
-      // 1. Try to read from the database first
-      try {
-        const cachedSub = await getUserSubscriptionFromDB(authHeader, user.id);
-        if (cachedSub) {
-          const status = cachedSub.status;
-          const currentPeriodEnd = cachedSub.current_period_end;
-          
-          if ((status === "active" || status === "trialing") && currentPeriodEnd) {
-            const expiryTime = new Date(currentPeriodEnd).getTime();
-            // If the subscription is active and has more than 10 minutes left
-            if (expiryTime > Date.now() + 10 * 60 * 1000) {
-              sendJson(response, 200, {
-                subscribed: true,
-                currentPeriodEnd: Math.floor(expiryTime / 1000),
-                cancelAtPeriodEnd: cachedSub.cancel_at_period_end || false,
-              });
-              return;
-            }
-          }
-        }
-      } catch (err) {
-        logError("Failed to fetch subscription from DB:", err);
-      }
-
-      // 2. Fall back to live Stripe query if not in DB or expired/inactive
       if (!process.env.STRIPE_SECRET_KEY) {
         sendJson(response, 500, { error: "STRIPE_SECRET_KEY is not configured on the server." });
         return;
@@ -755,24 +707,12 @@ export default async function handler(
       });
 
       if (customers.data.length === 0) {
-        try {
-          await updateUserSubscriptionInDB(authHeader, user.id, {
-            stripeCustomerId: null,
-            stripeSubscriptionId: null,
-            status: "inactive",
-            currentPeriodEnd: null,
-            cancelAtPeriodEnd: false,
-          });
-        } catch (err) {
-          logError("Failed to update subscription in DB:", err);
-        }
         sendJson(response, 200, { subscribed: false });
         return;
       }
 
-      const stripeCustomerId = customers.data[0].id;
       const subscriptions = await stripe.subscriptions.list({
-        customer: stripeCustomerId,
+        customer: customers.data[0].id,
         status: "active",
         limit: 1,
       });
@@ -780,39 +720,12 @@ export default async function handler(
       if (subscriptions.data.length > 0) {
         const sub = subscriptions.data[0] as any;
         const periodEnd = sub.current_period_end || sub.items?.data?.[0]?.current_period_end || sub.billing_cycle_anchor;
-        const cancelAtPeriodEnd = sub.cancel_at_period_end || false;
-        const stripeSubscriptionId = sub.id;
-        const status = sub.status || "active";
-
-        try {
-          await updateUserSubscriptionInDB(authHeader, user.id, {
-            stripeCustomerId,
-            stripeSubscriptionId,
-            status,
-            currentPeriodEnd: new Date(periodEnd * 1000).toISOString(),
-            cancelAtPeriodEnd,
-          });
-        } catch (err) {
-          logError("Failed to update subscription in DB:", err);
-        }
-
         sendJson(response, 200, {
           subscribed: true,
           currentPeriodEnd: periodEnd,
-          cancelAtPeriodEnd,
+          cancelAtPeriodEnd: sub.cancel_at_period_end,
         });
       } else {
-        try {
-          await updateUserSubscriptionInDB(authHeader, user.id, {
-            stripeCustomerId,
-            stripeSubscriptionId: null,
-            status: "inactive",
-            currentPeriodEnd: null,
-            cancelAtPeriodEnd: false,
-          });
-        } catch (err) {
-          logError("Failed to update subscription in DB:", err);
-        }
         sendJson(response, 200, { subscribed: false });
       }
       return;
@@ -859,6 +772,20 @@ export default async function handler(
   } catch (error) {
     logError("Spelling coach API error:", error);
     Sentry.captureException(error);
+    if (
+      error instanceof Error &&
+      error.message.startsWith("Unknown mock bee session:")
+    ) {
+      sendJson(response, 404, { error: error.message });
+      return;
+    }
+    if (
+      error instanceof Error &&
+      error.message.includes("is already completed.")
+    ) {
+      sendJson(response, 409, { error: error.message });
+      return;
+    }
     if (isAuthError(error)) {
       const statusCode =
         error instanceof Error &&
