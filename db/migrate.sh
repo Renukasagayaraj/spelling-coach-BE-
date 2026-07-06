@@ -25,8 +25,8 @@ else
 fi
 
 # Connect using Supabase's Session Pooler to support IPv4 on Docker.
-# Your project is assigned to aws-1-ap-northeast-2.pooler.supabase.com
-DB_HOST="aws-1-ap-northeast-2.pooler.supabase.com"
+# Your project is assigned to aws-1-us-west-1.pooler.supabase.com
+DB_HOST="aws-1-us-west-1.pooler.supabase.com"
 DB_PORT=${DB_PORT:-5432}
 DB_USER="postgres.$PROJECT_REF"
 DB_NAME=${DB_NAME:-postgres}
