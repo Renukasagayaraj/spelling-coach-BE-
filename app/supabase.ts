@@ -444,3 +444,58 @@ export async function getSessionAttemptsFromDB(
   }
   return data;
 }
+
+/**
+ * Fetch a user's subscription record from the DB.
+ */
+export async function getUserSubscriptionFromDB(
+  authToken: string,
+  userId: string,
+) {
+  const userClient = getSupabaseUserClient(authToken);
+  const { data, error } = await userClient
+    .from("user_subscriptions")
+    .select("*")
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+  return data;
+}
+
+/**
+ * Upsert a user's subscription record in the DB.
+ */
+export async function updateUserSubscriptionInDB(
+  authToken: string,
+  userId: string,
+  subData: {
+    stripeCustomerId: string | null;
+    stripeSubscriptionId: string | null;
+    status: string | null;
+    currentPeriodEnd: string | null;
+    cancelAtPeriodEnd: boolean;
+  },
+) {
+  const userClient = getSupabaseUserClient(authToken);
+  const { data, error } = await userClient
+    .from("user_subscriptions")
+    .upsert({
+      user_id: userId,
+      stripe_customer_id: subData.stripeCustomerId,
+      stripe_subscription_id: subData.stripeSubscriptionId,
+      status: subData.status,
+      current_period_end: subData.currentPeriodEnd,
+      cancel_at_period_end: subData.cancelAtPeriodEnd,
+      updated_at: new Date().toISOString(),
+    })
+    .select()
+    .single();
+
+  if (error) {
+    throw error;
+  }
+  return data;
+}
