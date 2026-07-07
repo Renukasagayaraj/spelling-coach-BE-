@@ -11,6 +11,9 @@ import {
   saveCustomListToDB,
   fetchUserProfileFromDB,
   updateUserProfileInDB,
+  startPracticeSessionInDB,
+  recordWordAttemptInDB,
+  endPracticeSessionInDB,
   type DBCustomList,
 } from "./supabase.js";
 import {
@@ -395,6 +398,75 @@ export default async function handler(
       const updates = JSON.parse(rawBody);
       const profile = await updateUserProfileInDB(authHeader, user.id, updates);
       sendJson(response, 200, { profile });
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/sessions/start") {
+      const user = await authenticateRequest(request);
+      const authHeader = request.headers.authorization || "";
+      const rawBody = await collectBody(request);
+      const { mode } = JSON.parse(rawBody);
+      const sessionId = await startPracticeSessionInDB(authHeader, user.id, mode);
+      sendJson(response, 200, { sessionId });
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/sessions/attempts") {
+      const user = await authenticateRequest(request);
+      const authHeader = request.headers.authorization || "";
+      const rawBody = await collectBody(request);
+      const {
+        sessionId,
+        targetWord,
+        childAttempt,
+        isCorrect,
+        attemptNumber,
+        level,
+        definitionViewed,
+        exampleViewed,
+        originViewed,
+        partOfSpeechViewed,
+        repeatWordCount,
+        usedVoiceInput,
+      } = JSON.parse(rawBody);
+
+      const attemptId = await recordWordAttemptInDB(
+        authHeader,
+        user.id,
+        sessionId,
+        targetWord,
+        childAttempt,
+        isCorrect,
+        attemptNumber || 1,
+        level,
+        definitionViewed,
+        exampleViewed,
+        originViewed,
+        partOfSpeechViewed,
+        repeatWordCount,
+        usedVoiceInput,
+      );
+
+      sendJson(response, 200, { attemptId });
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/sessions/end") {
+      const user = await authenticateRequest(request);
+      const authHeader = request.headers.authorization || "";
+      const rawBody = await collectBody(request);
+      const { sessionId, totalWordsAttempted, totalCorrect, durationSeconds } = JSON.parse(rawBody);
+
+      await endPracticeSessionInDB(
+        authHeader,
+        user.id,
+        sessionId,
+        totalWordsAttempted || 0,
+        totalCorrect || 0,
+        durationSeconds || 0,
+      );
+
+      sendJson(response, 200, { success: true });
       return;
     }
 
