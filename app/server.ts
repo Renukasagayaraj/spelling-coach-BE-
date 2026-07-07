@@ -14,6 +14,7 @@ import {
   startPracticeSessionInDB,
   recordWordAttemptInDB,
   endPracticeSessionInDB,
+  getUserStatisticsInDB,
   type DBCustomList,
 } from "./supabase.js";
 import {
@@ -398,6 +399,14 @@ export default async function handler(
       const updates = JSON.parse(rawBody);
       const profile = await updateUserProfileInDB(authHeader, user.id, updates);
       sendJson(response, 200, { profile });
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/users/stats") {
+      const user = await authenticateRequest(request);
+      const authHeader = request.headers.authorization || "";
+      const stats = await getUserStatisticsInDB(authHeader, user.id);
+      sendJson(response, 200, { stats });
       return;
     }
 
