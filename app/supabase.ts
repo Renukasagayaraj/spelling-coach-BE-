@@ -119,3 +119,78 @@ export async function saveCustomListToDB(
 
   return data as DBCustomList;
 }
+
+export interface UserProfile {
+  id: string;
+  email: string | null;
+  full_name: string | null;
+  theme_preference: string;
+  audio_enabled: boolean;
+  child_id: string | null;
+  age: number | null;
+  grade: string | null;
+  spelling_level: string | null;
+}
+
+/**
+ * Fetch the user's profile from the users table. If not found, insert a default row.
+ */
+export async function fetchUserProfileFromDB(authToken: string, userId: string, email?: string | null) {
+  const userClient = getSupabaseUserClient(authToken);
+  const { data, error } = await userClient
+    .from("users")
+    .select("id, email, full_name, theme_preference, audio_enabled, child_id, age, grade, spelling_level")
+    .eq("id", userId)
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  if (!data) {
+    const { data: inserted, error: insertError } = await userClient
+      .from("users")
+      .insert({
+        id: userId,
+        email: email ?? null,
+        theme_preference: "default",
+        audio_enabled: true,
+        child_id: "c1",
+        age: 10,
+        grade: "5",
+        spelling_level: "competition",
+      })
+      .select("id, email, full_name, theme_preference, audio_enabled, child_id, age, grade, spelling_level")
+      .maybeSingle();
+
+    if (insertError) {
+      throw insertError;
+    }
+    return inserted;
+  }
+
+  return data;
+}
+
+/**
+ * Update the user's profile details.
+ */
+export async function updateUserProfileInDB(
+  authToken: string,
+  userId: string,
+  updates: Partial<Omit<UserProfile, "id" | "email">>,
+) {
+  const userClient = getSupabaseUserClient(authToken);
+  const { data, error } = await userClient
+    .from("users")
+    .update(updates)
+    .eq("id", userId)
+    .select("id, email, full_name, theme_preference, audio_enabled, child_id, age, grade, spelling_level")
+    .single();
+
+  if (error) {
+    throw error;
+  }
+  return data;
+}
+

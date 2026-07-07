@@ -9,6 +9,9 @@ import {
   fetchCustomListsFromDB,
   fetchCustomListByIdFromDB,
   saveCustomListToDB,
+  fetchUserProfileFromDB,
+  updateUserProfileInDB,
+  type DBCustomList,
 } from "./supabase.js";
 import {
   buildSpellingCoachInput,
@@ -250,7 +253,7 @@ export default async function handler(
       const rawBody = await collectBody(request);
       const requestBody = JSON.parse(rawBody);
       let ownerUserId: string | undefined;
-      let customWordsFallback: Awaited<ReturnType<typeof fetchCustomListByIdFromDB>>["words"] | undefined;
+      let customWordsFallback: DBCustomList["words"] | undefined;
 
       if (requestBody.wordSource === "custom_list") {
         const user = await authenticateRequest(request);
@@ -374,6 +377,24 @@ export default async function handler(
     if (request.method === "GET" && url.pathname === "/api/auth/me") {
       const user = await authenticateRequest(request);
       sendJson(response, 200, { user });
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/users/profile") {
+      const user = await authenticateRequest(request);
+      const authHeader = request.headers.authorization || "";
+      const profile = await fetchUserProfileFromDB(authHeader, user.id, user.email);
+      sendJson(response, 200, { profile });
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/users/profile") {
+      const user = await authenticateRequest(request);
+      const authHeader = request.headers.authorization || "";
+      const rawBody = await collectBody(request);
+      const updates = JSON.parse(rawBody);
+      const profile = await updateUserProfileInDB(authHeader, user.id, updates);
+      sendJson(response, 200, { profile });
       return;
     }
 
