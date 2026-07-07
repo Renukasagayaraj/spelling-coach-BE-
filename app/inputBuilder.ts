@@ -41,8 +41,12 @@ export const CoachingRequestSchema = z
         previousMissPatterns: [],
         recentlyPracticedWords: [],
       }),
-  })
-  .strict();
+    definition: z.string().optional(),
+    exampleSentence: z.string().optional(),
+    origin: z.string().optional(),
+    partOfSpeech: z.string().optional(),
+    level: z.number().optional(),
+  });
 
 export type CoachingRequest = z.infer<typeof CoachingRequestSchema>;
 
@@ -355,10 +359,23 @@ export function buildSpellingCoachInput(
   request: CoachingRequest,
 ): SpellingCoachInput {
   const parsedRequest = CoachingRequestSchema.parse(request);
-  const word = getWordByText(parsedRequest.targetWord);
+  let word = getWordByText(parsedRequest.targetWord);
 
   if (!word) {
-    throw new Error(`Unknown target word: ${parsedRequest.targetWord}`);
+    // If the word isn't in catalog, build a dynamic custom WordEntry
+    word = {
+      word: parsedRequest.targetWord,
+      level: parsedRequest.level === 0 ? "custom" : (parsedRequest.level ? String(parsedRequest.level) : "custom") as any,
+      grade_band: "custom",
+      difficulty: "custom",
+      origin: parsedRequest.origin || "",
+      definition: parsedRequest.definition || "",
+      example_sentence: parsedRequest.exampleSentence || "",
+      patterns: [],
+      common_mistakes: [],
+      coach_tip: "",
+      part_of_speech: parsedRequest.partOfSpeech || "noun",
+    };
   }
 
   return buildSpellingCoachInputFromWordEntry(word, parsedRequest);
@@ -410,11 +427,11 @@ export function buildSpellingCoachInputFromWordEntry(
   };
 }
 
-export function buildWordPrecomputeInput(targetWord: string): SpellingCoachInput {
-  const word = getWordByText(targetWord);
+export function buildWordPrecomputeInput(targetWord: string | WordEntry): SpellingCoachInput {
+  const word = typeof targetWord === "string" ? getWordByText(targetWord) : targetWord;
 
   if (!word) {
-    throw new Error(`Unknown target word: ${targetWord}`);
+    throw new Error(`Unknown target word: ${typeof targetWord === "string" ? targetWord : targetWord.word}`);
   }
 
   return buildWordPrecomputeInputFromWordEntry(word);

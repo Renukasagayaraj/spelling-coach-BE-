@@ -595,11 +595,15 @@ export default async function handler(
 
       const wordEntry = getWordByText(word);
       if (!wordEntry) {
-        sendJson(response, 404, { error: `Unknown word: ${word}` });
-        return;
+        // If it is not in catalog, check if it's a valid alphabetic word to prevent arbitrary text abuse
+        if (!/^[a-zA-Z\s-]+$/.test(word)) {
+          sendJson(response, 404, { error: `Unknown word: ${word}` });
+          return;
+        }
       }
+      const targetWordText = wordEntry ? wordEntry.word : word;
 
-      const audio = await generatePronunciationAudio(wordEntry.word);
+      const audio = await generatePronunciationAudio(targetWordText);
       sendAudio(response, 200, audio);
       return;
     }
