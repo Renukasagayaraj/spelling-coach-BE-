@@ -215,6 +215,17 @@ export async function startPracticeSessionInDB(
     .maybeSingle();
 
   if (existingSession) {
+    const { error: updateError } = await userClient
+      .from("practice_sessions")
+      .update({
+        session_started_at: new Date().toISOString(),
+        session_ended_at: null,
+      })
+      .eq("id", existingSession.id);
+
+    if (updateError) {
+      console.error("Failed to update practice session timestamps:", updateError);
+    }
     return existingSession.id;
   }
 
