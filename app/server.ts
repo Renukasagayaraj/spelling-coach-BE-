@@ -458,6 +458,7 @@ export default async function handler(
         repeatWordCount,
         usedVoiceInput,
         mode,
+        coachingResponse,
       } = JSON.parse(rawBody);
 
       const attemptId = await recordWordAttemptInDB(
@@ -475,6 +476,7 @@ export default async function handler(
         repeatWordCount,
         usedVoiceInput,
         mode || "standard",
+        coachingResponse,
       );
 
       sendJson(response, 200, { attemptId });

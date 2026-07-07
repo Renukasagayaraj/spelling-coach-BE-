@@ -272,6 +272,7 @@ export async function recordWordAttemptInDB(
   repeatWordCount?: number,
   usedVoiceInput?: boolean,
   mode: string = "standard",
+  coachingResponse?: string,
 ) {
   const userClient = getSupabaseUserClient(authToken);
   const { data, error } = await userClient
@@ -289,6 +290,7 @@ export async function recordWordAttemptInDB(
       part_of_speech_viewed: partOfSpeechViewed,
       repeat_word_count: repeatWordCount || 0,
       used_voice_input: usedVoiceInput,
+      coaching_response: coachingResponse,
     })
     .select("id")
     .single();
