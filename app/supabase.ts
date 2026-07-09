@@ -37,6 +37,30 @@ export function getSupabaseUserClient(authToken: string) {
   });
 }
 
+/**
+ * Normalizes any incoming frontend mode string to one of the 6 allowed database enum values:
+ * 'standard_level_1', 'standard_level_2', 'standard_level_3', 'custom', 'foreign_origin', 'mock_bee'
+ */
+export function normalizeMode(mode: string, level?: number): string {
+  if (mode === "standard") {
+    return `standard_level_${level ?? 1}`;
+  }
+  if (mode.startsWith("standard_level_")) {
+    return mode;
+  }
+  if (mode.startsWith("custom_list_") || mode === "custom") {
+    return "custom";
+  }
+  if (mode.startsWith("foreign_origin_") || mode === "foreign_origin" || mode === "foreignOrigin") {
+    return "foreign_origin";
+  }
+  if (mode === "mock_bee" || mode === "mock-bee") {
+    return "mock_bee";
+  }
+  return mode;
+}
+
+
 export interface DBCustomList {
   id: string;
   name: string;
@@ -203,13 +227,14 @@ export async function startPracticeSessionInDB(
   mode: string,
 ) {
   const userClient = getSupabaseUserClient(authToken);
+  const dbMode = normalizeMode(mode);
 
   // Check if there is an active session for this user and mode
   const { data: activeSession } = await userClient
     .from("practice_sessions")
     .select("id")
     .eq("user_id", userId)
-    .eq("mode", mode)
+    .eq("mode", dbMode)
     .is("session_ended_at", null)
     .order("session_started_at", { ascending: false })
     .limit(1)
@@ -223,7 +248,7 @@ export async function startPracticeSessionInDB(
     .from("practice_sessions")
     .insert({
       user_id: userId,
-      mode,
+      mode: dbMode,
       session_started_at: new Date().toISOString(),
     })
     .select("id")
@@ -297,48 +322,43 @@ export async function recordWordAttemptInDB(
       .eq("id", sessionId);
   }
 
-  // Fetch current user_statistics for the specific mode/level
-  const currentLevel = mode === "standard" ? (level !== undefined ? level : 1) : null;
+  // Fetch current user_statistics for the specific normalized mode (level is null for enum modes)
+  const dbMode = normalizeMode(mode, level);
   const query = userClient
     .from("user_statistics")
-    .select("current_streak, best_streak, total_attempts, mastered_words")
+    .select("current_streak, best_streak, total_attempts, correct_attempts")
     .eq("user_id", userId)
-    .eq("mode", mode);
-
-  if (currentLevel !== null) {
-    query.eq("level", currentLevel);
-  } else {
-    query.is("level", null);
-  }
+    .eq("mode", dbMode)
+    .is("level", null);
 
   const { data: stats } = await query.maybeSingle();
 
   const currentStreak = stats ? (stats.current_streak || 0) : 0;
   const bestStreak = stats ? (stats.best_streak || 0) : 0;
   const totalAttempts = stats ? (stats.total_attempts || 0) : 0;
-  const masteredWords = stats ? (stats.mastered_words || 0) : 0;
+  const correctAttempts = stats ? (stats.correct_attempts || 0) : 0;
 
   const nextStreak = isCorrect ? currentStreak + 1 : 0;
   const nextBestStreak = Math.max(bestStreak, nextStreak);
   const nextAttempts = totalAttempts + 1;
-  const nextMasteredWords = isCorrect ? masteredWords + 1 : masteredWords;
+  const nextCorrectAttempts = isCorrect ? correctAttempts + 1 : correctAttempts;
 
   // Calculate earned badges based on stats rules
   const badges: string[] = [];
   if (nextBestStreak >= 3) badges.push("streak3");
   if (nextBestStreak >= 5) badges.push("streak5");
   if (nextBestStreak >= 10) badges.push("streak10");
-  if (nextMasteredWords >= 25) badges.push("total25");
-  if (nextMasteredWords >= 50) badges.push("total50");
+  if (nextCorrectAttempts >= 25) badges.push("total25");
+  if (nextCorrectAttempts >= 50) badges.push("total50");
 
   const { error: statsError } = await userClient
     .from("user_statistics")
     .upsert({
       user_id: userId,
-      mode: mode,
-      level: currentLevel,
+      mode: dbMode,
+      level: null,
       total_attempts: nextAttempts,
-      mastered_words: nextMasteredWords,
+      correct_attempts: nextCorrectAttempts,
       current_streak: nextStreak,
       best_streak: nextBestStreak,
       badges: badges,
@@ -393,7 +413,7 @@ export async function getUserStatisticsInDB(
   const userClient = getSupabaseUserClient(authToken);
   const { data, error } = await userClient
     .from("user_statistics")
-    .select("level, mode, current_streak, best_streak, total_attempts, mastered_words, badges")
+    .select("level, mode, current_streak, best_streak, total_attempts, correct_attempts, badges")
     .eq("user_id", userId);
 
   if (error) {
