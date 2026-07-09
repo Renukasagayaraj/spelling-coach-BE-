@@ -204,29 +204,19 @@ export async function startPracticeSessionInDB(
 ) {
   const userClient = getSupabaseUserClient(authToken);
 
-  // Check if there is an existing session for this user and mode
-  const { data: existingSession } = await userClient
+  // Check if there is an active session for this user and mode
+  const { data: activeSession } = await userClient
     .from("practice_sessions")
     .select("id")
     .eq("user_id", userId)
     .eq("mode", mode)
+    .is("session_ended_at", null)
     .order("session_started_at", { ascending: false })
     .limit(1)
     .maybeSingle();
 
-  if (existingSession) {
-    const { error: updateError } = await userClient
-      .from("practice_sessions")
-      .update({
-        session_started_at: new Date().toISOString(),
-        session_ended_at: null,
-      })
-      .eq("id", existingSession.id);
-
-    if (updateError) {
-      console.error("Failed to update practice session timestamps:", updateError);
-    }
-    return existingSession.id;
+  if (activeSession) {
+    return activeSession.id as string;
   }
 
   const { data, error } = await userClient
@@ -242,17 +232,6 @@ export async function startPracticeSessionInDB(
   if (error) {
     throw error;
   }
-
-  // Parse level from mode (e.g. "standard_level_2" -> level 2)
-  let level = 1;
-  if (mode.startsWith("standard_level_")) {
-    const parsed = parseInt(mode.replace("standard_level_", ""), 10);
-    if (!isNaN(parsed)) {
-      level = parsed;
-    }
-  }
-
-
 
   return data.id as string;
 }
