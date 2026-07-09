@@ -1,9 +1,6 @@
 name: Deploy to Dev
 
 on:
-  push:
-    branches:
-      - dev
   workflow_dispatch:
     inputs:
       description:
@@ -31,9 +28,35 @@ jobs:
       - name: Run Tests
         run: npm test
 
+  verify:
+    name: Verify Secrets
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify Environment Secrets
+        run: |
+          MISSING=""
+          [ -z "${{ secrets.VERCEL_TOKEN }}" ] && MISSING="$MISSING VERCEL_TOKEN"
+          [ -z "${{ secrets.VERCEL_ORG_ID }}" ] && MISSING="$MISSING VERCEL_ORG_ID"
+          [ -z "${{ secrets.DEV_VERCEL_PROJECT_ID }}" ] && MISSING="$MISSING DEV_VERCEL_PROJECT_ID"
+          [ -z "${{ secrets.DEV_OPENAI_API_KEY }}" ] && MISSING="$MISSING DEV_OPENAI_API_KEY"
+          [ -z "${{ secrets.DEV_SENTRY_DSN }}" ] && MISSING="$MISSING DEV_SENTRY_DSN"
+          [ -z "${{ secrets.DEV_SUPABASE_URL }}" ] && MISSING="$MISSING DEV_SUPABASE_URL"
+          [ -z "${{ secrets.DEV_SUPABASE_PUBLISHABLE_KEY }}" ] && MISSING="$MISSING DEV_SUPABASE_PUBLISHABLE_KEY"
+          [ -z "${{ secrets.DEV_STRIPE_SECRET_KEY }}" ] && MISSING="$MISSING DEV_STRIPE_SECRET_KEY"
+          [ -z "${{ secrets.DEV_STRIPE_PRICE_ID }}" ] && MISSING="$MISSING DEV_STRIPE_PRICE_ID"
+          [ -z "${{ secrets.DEV_LANGFUSE_PUBLIC_KEY }}" ] && MISSING="$MISSING DEV_LANGFUSE_PUBLIC_KEY"
+          [ -z "${{ secrets.DEV_LANGFUSE_SECRET_KEY }}" ] && MISSING="$MISSING DEV_LANGFUSE_SECRET_KEY"
+          [ -z "${{ secrets.DEV_LANGFUSE_BASE_URL }}" ] && MISSING="$MISSING DEV_LANGFUSE_BASE_URL"
+          
+          if [ -n "$MISSING" ]; then
+            echo "::error::Missing GitHub Secrets:$MISSING"
+            exit 1
+          fi
+
   deploy:
     name: Deploy to Vercel (Dev)
-    needs: test
+    needs: verify
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
