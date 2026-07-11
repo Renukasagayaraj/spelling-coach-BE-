@@ -221,27 +221,71 @@ export async function updateUserProfileInDB(
 /**
  * Start a new practice session in the DB.
  */
+export type StartPracticeSessionResult =
+  | {
+      action: "created";
+      sessionId: string;
+    }
+  | {
+      action: "resume_existing";
+      sessionId: string;
+    }
+  | {
+      action: "active_session_conflict";
+      activeSessionId: string;
+      activeMode: string;
+    };
+
 export async function startPracticeSessionInDB(
   authToken: string,
   userId: string,
   mode: string,
-) {
+  level?: number,
+  forceCloseCurrent?: boolean,
+): Promise<StartPracticeSessionResult> {
   const userClient = getSupabaseUserClient(authToken);
-  const dbMode = normalizeMode(mode);
+  const dbMode = normalizeMode(mode, level);
 
-  // Check if there is an active session for this user and mode
-  const { data: activeSession } = await userClient
+  const { data: activeSession, error: activeSessionError } = await userClient
     .from("practice_sessions")
-    .select("id")
+    .select("id, mode")
     .eq("user_id", userId)
-    .eq("mode", dbMode)
     .is("session_ended_at", null)
     .order("session_started_at", { ascending: false })
     .limit(1)
     .maybeSingle();
 
+  if (activeSessionError) {
+    throw activeSessionError;
+  }
+
   if (activeSession) {
-    return activeSession.id as string;
+    if (activeSession.mode === dbMode) {
+      return {
+        action: "resume_existing",
+        sessionId: activeSession.id as string,
+      };
+    }
+
+    if (!forceCloseCurrent) {
+      return {
+        action: "active_session_conflict",
+        activeSessionId: activeSession.id as string,
+        activeMode: activeSession.mode as string,
+      };
+    }
+
+    const { error: endError } = await userClient
+      .from("practice_sessions")
+      .update({
+        session_ended_at: new Date().toISOString(),
+      })
+      .eq("id", activeSession.id)
+      .eq("user_id", userId);
+
+    if (endError) {
+      throw endError;
+    }
   }
 
   const { data, error } = await userClient
@@ -258,7 +302,10 @@ export async function startPracticeSessionInDB(
     throw error;
   }
 
-  return data.id as string;
+  return {
+    action: "created",
+    sessionId: data.id as string,
+  };
 }
 
 export async function recordWordAttemptInDB(

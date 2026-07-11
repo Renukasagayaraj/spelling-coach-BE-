@@ -437,9 +437,16 @@ export default async function handler(
       const user = await authenticateRequest(request);
       const authHeader = request.headers.authorization || "";
       const rawBody = await collectBody(request);
-      const { mode } = JSON.parse(rawBody);
-      const sessionId = await startPracticeSessionInDB(authHeader, user.id, mode);
-      sendJson(response, 200, { sessionId });
+      const { mode, level, forceCloseCurrent } = JSON.parse(rawBody);
+
+      const result = await startPracticeSessionInDB(
+        authHeader,
+        user.id,
+        mode,
+        level,
+        forceCloseCurrent,
+      );
+      sendJson(response, 200, result);
       return;
     }
 
