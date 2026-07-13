@@ -236,6 +236,49 @@ export type StartPracticeSessionResult =
       activeMode: string;
     };
 
+function calculateSessionDurationSeconds(sessionStartedAt: string, sessionEndedAt: string) {
+  const startedAtMs = new Date(sessionStartedAt).getTime();
+  const endedAtMs = new Date(sessionEndedAt).getTime();
+
+  if (Number.isNaN(startedAtMs) || Number.isNaN(endedAtMs)) {
+    return 0;
+  }
+
+  return Math.max(0, Math.round((endedAtMs - startedAtMs) / 1000));
+}
+
+async function forceCloseActiveSessionInDB(
+  userClient: ReturnType<typeof getSupabaseUserClient>,
+  userId: string,
+  activeSession: {
+    id: string;
+    session_started_at: string;
+    total_words_attempted: number | null;
+    total_correct: number | null;
+  },
+) {
+  const endedAt = new Date().toISOString();
+  const durationSeconds = calculateSessionDurationSeconds(
+    activeSession.session_started_at,
+    endedAt,
+  );
+
+  const { error: endError } = await userClient
+    .from("practice_sessions")
+    .update({
+      session_ended_at: endedAt,
+      duration_seconds: durationSeconds,
+      total_words_attempted: activeSession.total_words_attempted || 0,
+      total_correct: activeSession.total_correct || 0,
+    })
+    .eq("id", activeSession.id)
+    .eq("user_id", userId);
+
+  if (endError) {
+    throw endError;
+  }
+}
+
 export async function startPracticeSessionInDB(
   authToken: string,
   userId: string,
@@ -248,7 +291,7 @@ export async function startPracticeSessionInDB(
 
   const { data: activeSession, error: activeSessionError } = await userClient
     .from("practice_sessions")
-    .select("id, mode")
+    .select("id, mode, session_started_at, total_words_attempted, total_correct")
     .eq("user_id", userId)
     .is("session_ended_at", null)
     .order("session_started_at", { ascending: false })
@@ -275,17 +318,12 @@ export async function startPracticeSessionInDB(
       };
     }
 
-    const { error: endError } = await userClient
-      .from("practice_sessions")
-      .update({
-        session_ended_at: new Date().toISOString(),
-      })
-      .eq("id", activeSession.id)
-      .eq("user_id", userId);
-
-    if (endError) {
-      throw endError;
-    }
+    await forceCloseActiveSessionInDB(userClient, userId, {
+      id: activeSession.id as string,
+      session_started_at: activeSession.session_started_at as string,
+      total_words_attempted: activeSession.total_words_attempted as number | null,
+      total_correct: activeSession.total_correct as number | null,
+    });
   }
 
   const { data, error } = await userClient
@@ -544,4 +582,161 @@ export async function updateUserSubscriptionInDB(
     throw error;
   }
   return data;
+}
+
+export interface DBMockBeeSessionRow {
+  id: string;
+  user_id: string;
+  mode: "mock_bee";
+  session_started_at: string;
+  session_ended_at: string | null;
+  total_words_attempted: number | null;
+  total_correct: number | null;
+  duration_seconds: number | null;
+  created_at: string;
+  session_config: any;
+  session_state: any;
+}
+
+export async function createMockBeeSessionInDB(
+  authToken: string,
+  userId: string,
+  sessionConfig: unknown,
+  sessionState: unknown,
+) {
+  const userClient = getSupabaseUserClient(authToken);
+
+  const { data, error } = await userClient
+    .from("practice_sessions")
+    .insert({
+      user_id: userId,
+      mode: "mock_bee",
+      session_started_at: new Date().toISOString(),
+      session_config: sessionConfig,
+      session_state: sessionState,
+      total_words_attempted: 0,
+      total_correct: 0,
+    })
+    .select("*")
+    .single();
+
+  if (error) throw error;
+  return data as DBMockBeeSessionRow;
+}
+
+export async function getMockBeeSessionFromDB(
+  authToken: string,
+  userId: string,
+  sessionId: string,
+) {
+  const userClient = getSupabaseUserClient(authToken);
+
+  const { data, error } = await userClient
+    .from("practice_sessions")
+    .select("*")
+    .eq("id", sessionId)
+    .eq("user_id", userId)
+    .eq("mode", "mock_bee")
+    .maybeSingle();
+
+  if (error) throw error;
+  return data as DBMockBeeSessionRow | null;
+}
+
+export async function updateMockBeeSessionInDB(
+  authToken: string,
+  userId: string,
+  sessionId: string,
+  updates: {
+    session_state?: unknown;
+    session_config?: unknown;
+    total_words_attempted?: number;
+    total_correct?: number;
+    session_ended_at?: string | null;
+    duration_seconds?: number;
+  },
+) {
+  const userClient = getSupabaseUserClient(authToken);
+
+  const { data, error } = await userClient
+    .from("practice_sessions")
+    .update(updates)
+    .eq("id", sessionId)
+    .eq("user_id", userId)
+    .eq("mode", "mock_bee")
+    .select("*")
+    .single();
+
+  if (error) throw error;
+  return data as DBMockBeeSessionRow;
+}
+
+export async function startMockBeeSessionInDB(
+  authToken: string,
+  userId: string,
+  sessionConfig: unknown,
+  sessionState: unknown,
+  forceCloseCurrent?: boolean,
+): Promise<StartPracticeSessionResult> {
+  const userClient = getSupabaseUserClient(authToken);
+
+  const { data: activeSession, error: activeSessionError } = await userClient
+    .from("practice_sessions")
+    .select("id, mode, session_started_at, total_words_attempted, total_correct")
+    .eq("user_id", userId)
+    .is("session_ended_at", null)
+    .order("session_started_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (activeSessionError) {
+    throw activeSessionError;
+  }
+
+  if (activeSession) {
+    if (activeSession.mode === "mock_bee" && !forceCloseCurrent) {
+      return {
+        action: "resume_existing",
+        sessionId: activeSession.id as string,
+      };
+    }
+
+    if (!forceCloseCurrent) {
+      return {
+        action: "active_session_conflict",
+        activeSessionId: activeSession.id as string,
+        activeMode: activeSession.mode as string,
+      };
+    }
+
+    await forceCloseActiveSessionInDB(userClient, userId, {
+      id: activeSession.id as string,
+      session_started_at: activeSession.session_started_at as string,
+      total_words_attempted: activeSession.total_words_attempted as number | null,
+      total_correct: activeSession.total_correct as number | null,
+    });
+  }
+
+  const { data, error } = await userClient
+    .from("practice_sessions")
+    .insert({
+      user_id: userId,
+      mode: "mock_bee",
+      session_started_at: new Date().toISOString(),
+      session_config: sessionConfig,
+      session_state: sessionState,
+      total_words_attempted: 0,
+      total_correct: 0,
+    })
+    .select("id")
+    .single();
+
+  if (error) {
+    throw error;
+  }
+
+  return {
+    action: "created",
+    sessionId: data.id as string,
+  };
 }

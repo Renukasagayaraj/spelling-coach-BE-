@@ -44,7 +44,7 @@ import {
 } from "./referenceData.js";
 import { runSpellingCoachAgent } from "./runAgent.js";
 import { recordSpellingCoachTrace, recordImportListTrace } from "./langfuse.js";
-import { InMemoryMockBeeSessionStore, MockBeeService } from "./mockBee.js";
+import { MockBeeService } from "./mockBee.js";
 import {
   getCustomWordListById,
   getForeignOriginWordListByOrigin,
@@ -76,7 +76,7 @@ function getStripe(): Stripe {
 }
 
 const PORT = Number(process.env.PORT ?? 3000);
-const mockBeeService = new MockBeeService(new InMemoryMockBeeSessionStore());
+const mockBeeService = new MockBeeService();
 
 function sendJson(response: import("node:http").ServerResponse, statusCode: number, body: unknown) {
   response.writeHead(statusCode, {
@@ -277,11 +277,19 @@ export default async function handler(
         customWordsFallback = dbList.words;
       }
 
-      const session = await mockBeeService.createSession(requestBody, {
-        ownerUserId,
-        customWordsFallback,
-      });
-      sendJson(response, 200, { session });
+      const user = await authenticateRequest(request);
+      const authHeader = request.headers.authorization || "";
+
+      const result = await mockBeeService.createSession(
+        authHeader,
+        user.id,
+        requestBody,
+        {
+          ownerUserId: user.id,
+          customWordsFallback,
+        },
+      );
+      sendJson(response, 200, result);
       return;
     }
 
@@ -298,22 +306,26 @@ export default async function handler(
         return;
       }
 
-      const session = await mockBeeService.getInternalSession(sessionId);
-      if (session.ownerUserId) {
-        const user = await authenticateRequest(request);
-        if (user.id !== session.ownerUserId) {
-          sendJson(response, 403, { error: "Forbidden." });
-          return;
-        }
+      const user = await authenticateRequest(request);
+      const authHeader = request.headers.authorization || "";
+      const session = await mockBeeService.getInternalSession(authHeader, user.id, sessionId);
+
+      if (session.ownerUserId && user.id !== session.ownerUserId) {
+        sendJson(response, 403, { error: "Forbidden." });
+        return;
       }
 
       if (tail.length === 0) {
-        sendJson(response, 200, { session: await mockBeeService.getSession(sessionId) });
+        sendJson(response, 200, {
+          session: await mockBeeService.getSession(authHeader, user.id, sessionId),
+        });
         return;
       }
 
       if (tail[0] === "review") {
-        sendJson(response, 200, { review: await mockBeeService.getReview(sessionId) });
+        sendJson(response, 200, {
+          review: await mockBeeService.getReview(authHeader, user.id, sessionId),
+        });
         return;
       }
 
@@ -350,25 +362,44 @@ export default async function handler(
         return;
       }
 
-      const session = await mockBeeService.getInternalSession(sessionId);
-      if (session.ownerUserId) {
-        const user = await authenticateRequest(request);
-        if (user.id !== session.ownerUserId) {
-          sendJson(response, 403, { error: "Forbidden." });
-          return;
-        }
+      const user = await authenticateRequest(request);
+      const authHeader = request.headers.authorization || "";
+      const session = await mockBeeService.getInternalSession(authHeader, user.id, sessionId);
+
+      if (session.ownerUserId && user.id !== session.ownerUserId) {
+        sendJson(response, 403, { error: "Forbidden." });
+        return;
       }
 
       if (tail[0] === "submit") {
         const rawBody = await collectBody(request);
-        const result = await mockBeeService.submitAttempt(sessionId, JSON.parse(rawBody));
+        const result = await mockBeeService.submitAttempt(
+          authHeader,
+          user.id,
+          sessionId,
+          JSON.parse(rawBody),
+        );
         sendJson(response, 200, result);
         return;
       }
 
       if (tail[0] === "timeout") {
-        const result = await mockBeeService.timeoutCurrentWord(sessionId);
+        const result = await mockBeeService.timeoutCurrentWord(
+          authHeader,
+          user.id,
+          sessionId,
+        );
         sendJson(response, 200, result);
+        return;
+      }
+
+      if (tail[0] === "end") {
+        const sessionView = await mockBeeService.endSession(
+          authHeader,
+          user.id,
+          sessionId,
+        );
+        sendJson(response, 200, { session: sessionView });
         return;
       }
     }
