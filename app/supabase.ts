@@ -74,6 +74,82 @@ export function normalizeMode(mode: string, level?: number): string {
   return mode;
 }
 
+type PracticeScope = {
+  dbMode: string;
+  modeKey: string;
+  originLanguage: string | null;
+  customListId: string | null;
+  customListName: string | null;
+};
+
+function normalizeOptionalText(value?: string | null): string | null {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
+}
+
+function buildModeKeyFromScope(scope: {
+  dbMode: string;
+  originLanguage?: string | null;
+  customListId?: string | null;
+}): string {
+  if (scope.dbMode === "foreign_origin" && scope.originLanguage) {
+    return `foreign_origin_${scope.originLanguage}`;
+  }
+
+  if (scope.dbMode === "custom" && scope.customListId) {
+    return `custom_list_${scope.customListId}`;
+  }
+
+  return scope.dbMode;
+}
+
+function resolvePracticeScope(
+  mode: string,
+  level?: number,
+  options?: {
+    originLanguage?: string | null;
+    customListId?: string | null;
+    customListName?: string | null;
+  },
+): PracticeScope {
+  const dbMode = normalizeMode(mode, level);
+
+  let originLanguage = normalizeOptionalText(options?.originLanguage);
+  let customListId = normalizeOptionalText(options?.customListId);
+
+  if (!originLanguage && mode.startsWith("foreign_origin_")) {
+    originLanguage = normalizeOptionalText(mode.replace("foreign_origin_", ""));
+  }
+
+  if (!customListId && mode.startsWith("custom_list_")) {
+    customListId = normalizeOptionalText(mode.replace("custom_list_", ""));
+  }
+
+  return {
+    dbMode,
+    modeKey: buildModeKeyFromScope({
+      dbMode,
+      originLanguage,
+      customListId,
+    }),
+    originLanguage,
+    customListId,
+    customListName: normalizeOptionalText(options?.customListName),
+  };
+}
+
+function buildModeKeyFromSessionRow(session: {
+  mode: string;
+  origin_language?: string | null;
+  custom_list_id?: string | null;
+}) {
+  return buildModeKeyFromScope({
+    dbMode: session.mode,
+    originLanguage: session.origin_language,
+    customListId: session.custom_list_id,
+  });
+}
+
 
 export interface DBCustomList {
   id: string;
@@ -299,13 +375,18 @@ export async function startPracticeSessionInDB(
   mode: string,
   level?: number,
   forceCloseCurrent?: boolean,
+  options?: {
+    originLanguage?: string | null;
+    customListId?: string | null;
+    customListName?: string | null;
+  },
 ): Promise<StartPracticeSessionResult> {
   const userClient = getSupabaseUserClient(authToken);
-  const dbMode = normalizeMode(mode, level);
+  const scope = resolvePracticeScope(mode, level, options);
 
   const { data: activeSession, error: activeSessionError } = await userClient
     .from("practice_sessions")
-    .select("id, mode, session_started_at, total_words_attempted, total_correct")
+    .select("id, mode, origin_language, custom_list_id, session_started_at, total_words_attempted, total_correct")
     .eq("user_id", userId)
     .is("session_ended_at", null)
     .order("session_started_at", { ascending: false })
@@ -317,7 +398,9 @@ export async function startPracticeSessionInDB(
   }
 
   if (activeSession) {
-    if (activeSession.mode === dbMode) {
+    const activeModeKey = buildModeKeyFromSessionRow(activeSession);
+
+    if (activeModeKey === scope.modeKey) {
       return {
         action: "resume_existing",
         sessionId: activeSession.id as string,
@@ -328,7 +411,7 @@ export async function startPracticeSessionInDB(
       return {
         action: "active_session_conflict",
         activeSessionId: activeSession.id as string,
-        activeMode: activeSession.mode as string,
+        activeMode: activeModeKey,
       };
     }
 
@@ -344,7 +427,10 @@ export async function startPracticeSessionInDB(
     .from("practice_sessions")
     .insert({
       user_id: userId,
-      mode: dbMode,
+      mode: scope.dbMode,
+      origin_language: scope.originLanguage,
+      custom_list_id: scope.customListId,
+      custom_list_name: scope.customListName,
       session_started_at: new Date().toISOString(),
     })
     .select("id")
@@ -378,6 +464,7 @@ export async function recordWordAttemptInDB(
   coachingResponse?: string,
 ) {
   const userClient = getSupabaseUserClient(authToken);
+  const scope = resolvePracticeScope(mode, level);
   const { data, error } = await userClient
     .from("word_attempts")
     .insert({
@@ -422,13 +509,24 @@ export async function recordWordAttemptInDB(
   }
 
   // Fetch current user_statistics for the specific normalized mode (level is null for enum modes)
-  const dbMode = normalizeMode(mode, level);
-  const query = userClient
+  let query = userClient
     .from("user_statistics")
     .select("current_streak, best_streak, total_attempts, correct_attempts")
     .eq("user_id", userId)
-    .eq("mode", dbMode)
+    .eq("mode", scope.dbMode)
     .is("level", null);
+
+  if (scope.originLanguage) {
+    query = query.eq("origin_language", scope.originLanguage);
+  } else {
+    query = query.is("origin_language", null);
+  }
+
+  if (scope.customListId) {
+    query = query.eq("custom_list_id", scope.customListId);
+  } else {
+    query = query.is("custom_list_id", null);
+  }
 
   const { data: stats } = await query.maybeSingle();
 
@@ -454,8 +552,10 @@ export async function recordWordAttemptInDB(
     .from("user_statistics")
     .upsert({
       user_id: userId,
-      mode: dbMode,
+      mode: scope.dbMode,
       level: null,
+      origin_language: scope.originLanguage,
+      custom_list_id: scope.customListId,
       total_attempts: nextAttempts,
       correct_attempts: nextCorrectAttempts,
       current_streak: nextStreak,
@@ -463,7 +563,7 @@ export async function recordWordAttemptInDB(
       badges: badges,
       updated_at: new Date().toISOString(),
     }, {
-      onConflict: "user_id,mode,level"
+      onConflict: "user_id,mode,level,origin_language,custom_list_id"
     });
 
   if (statsError) {
@@ -512,7 +612,7 @@ export async function getUserStatisticsInDB(
   const userClient = getSupabaseUserClient(authToken);
   const { data, error } = await userClient
     .from("user_statistics")
-    .select("level, mode, current_streak, best_streak, total_attempts, correct_attempts, badges")
+    .select("level, mode, origin_language, custom_list_id, current_streak, best_streak, total_attempts, correct_attempts, badges")
     .eq("user_id", userId);
 
   if (error) {

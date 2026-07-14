@@ -79,6 +79,15 @@ type MockBeeTurn = {
   reviewError?: string;
 };
 
+type StoredMockBeeTurnState = Omit<MockBeeTurn, "word"> & {
+  word?: WordEntry;
+};
+
+type StoredMockBeeWord = Pick<
+  WordEntry,
+  "word" | "level" | "grade_band" | "difficulty" | "origin" | "definition" | "example_sentence" | "patterns" | "part_of_speech"
+>;
+
 export type MockBeeSession = {
   id: string;
   createdAt: string;
@@ -300,6 +309,40 @@ async function pickWordsForSession(
   return selected;
 }
 
+function buildStoredMockBeeWord(word: WordEntry): StoredMockBeeWord {
+  return {
+    word: word.word,
+    level: word.level,
+    grade_band: word.grade_band,
+    difficulty: word.difficulty,
+    origin: word.origin,
+    definition: word.definition,
+    example_sentence: word.example_sentence,
+    patterns: word.patterns,
+    part_of_speech: word.part_of_speech,
+  };
+}
+
+function hydrateStoredMockBeeWord(word: StoredMockBeeWord | WordEntry): WordEntry {
+  return {
+    word: word.word,
+    level: word.level,
+    grade_band: word.grade_band,
+    difficulty: word.difficulty,
+    origin: word.origin,
+    definition: word.definition,
+    example_sentence: word.example_sentence,
+    patterns: Array.isArray(word.patterns) ? word.patterns : [],
+    common_mistakes: "common_mistakes" in word && Array.isArray(word.common_mistakes)
+      ? word.common_mistakes
+      : [],
+    coach_tip: "coach_tip" in word && typeof word.coach_tip === "string"
+      ? word.coach_tip
+      : "",
+    part_of_speech: word.part_of_speech,
+  };
+}
+
 function buildMockBeeSessionConfig(session: MockBeeSession) {
   return {
     level: session.config.level,
@@ -307,7 +350,7 @@ function buildMockBeeSessionConfig(session: MockBeeSession) {
     customListId: session.config.customListId,
     wordCount: session.config.wordCount,
     childProfile: session.childProfile,
-    words: session.turns.map((turn) => turn.word),
+    words: session.turns.map((turn) => buildStoredMockBeeWord(turn.word)),
   };
 }
 
@@ -315,7 +358,7 @@ function buildMockBeeSessionState(session: MockBeeSession) {
   return {
     status: session.status,
     currentTurnIndex: session.currentTurnIndex,
-    turns: session.turns,
+    turns: session.turns.map(({ word: _word, ...turn }) => turn),
     updatedAt: session.updatedAt,
   };
 }
@@ -330,6 +373,10 @@ function calculateDurationSeconds(sessionStartedAt: string, endedAt: string): nu
 function hydrateMockBeeSession(row: DBMockBeeSessionRow): MockBeeSession {
   const config = row.session_config ?? {};
   const state = row.session_state ?? {};
+  const configWords = Array.isArray(config.words)
+    ? (config.words as Array<StoredMockBeeWord | WordEntry>).map(hydrateStoredMockBeeWord)
+    : [];
+  const stateTurns = Array.isArray(state.turns) ? (state.turns as StoredMockBeeTurnState[]) : [];
 
   return {
     id: row.id,
@@ -343,7 +390,11 @@ function hydrateMockBeeSession(row: DBMockBeeSessionRow): MockBeeSession {
       wordCount: config.wordCount,
     },
     childProfile: config.childProfile,
-    turns: state.turns ?? [],
+    turns: stateTurns.map((turn, index) => ({
+      ...turn,
+      index: turn.index ?? index,
+      word: turn.word ?? configWords[index],
+    })),
     currentTurnIndex: state.currentTurnIndex ?? 0,
     status: state.status ?? "active",
   };

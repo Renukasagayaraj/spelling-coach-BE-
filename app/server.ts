@@ -259,26 +259,21 @@ export default async function handler(
     if (request.method === "POST" && url.pathname === "/api/mock-bee/sessions") {
       const rawBody = await collectBody(request);
       const requestBody = JSON.parse(rawBody);
-      let ownerUserId: string | undefined;
-      let customWordsFallback: DBCustomList["words"] | undefined;
-
-      if (requestBody.wordSource === "custom_list") {
-        const user = await authenticateRequest(request);
-        const authHeader = request.headers.authorization || "";
-        const customListId = String(requestBody.customListId ?? "");
-        const dbList = await fetchCustomListByIdFromDB(authHeader, customListId, user.id);
-        if (!dbList) {
-          sendJson(response, 404, {
-            error: `Unknown custom list: ${customListId}`,
-          });
-          return;
-        }
-        ownerUserId = user.id;
-        customWordsFallback = dbList.words;
-      }
 
       const user = await authenticateRequest(request);
       const authHeader = request.headers.authorization || "";
+
+      let customWordsFallback: DBCustomList["words"] | undefined;
+
+      if (requestBody.wordSource === "custom_list") {
+        const customListId = String(requestBody.customListId ?? "");
+        const dbList = await fetchCustomListByIdFromDB(authHeader, customListId, user.id);
+        if (!dbList) {
+          sendJson(response, 404, { error: `Unknown custom list: ${customListId}` });
+          return;
+        }
+        customWordsFallback = dbList.words;
+      }
 
       const result = await mockBeeService.createSession(
         authHeader,
@@ -468,7 +463,14 @@ export default async function handler(
       const user = await authenticateRequest(request);
       const authHeader = request.headers.authorization || "";
       const rawBody = await collectBody(request);
-      const { mode, level, forceCloseCurrent } = JSON.parse(rawBody);
+      const {
+        mode,
+        level,
+        forceCloseCurrent,
+        originLanguage,
+        customListId,
+        customListName,
+      } = JSON.parse(rawBody);
 
       const result = await startPracticeSessionInDB(
         authHeader,
@@ -476,6 +478,11 @@ export default async function handler(
         mode,
         level,
         forceCloseCurrent,
+        {
+          originLanguage,
+          customListId,
+          customListName,
+        },
       );
       sendJson(response, 200, result);
       return;
