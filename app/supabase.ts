@@ -41,11 +41,25 @@ export function getSupabaseUserClient(authToken: string) {
  * Normalizes any incoming frontend mode string to one of the 6 allowed database enum values:
  * 'standard_level_1', 'standard_level_2', 'standard_level_3', 'custom', 'foreign_origin', 'mock_bee'
  */
+function normalizeStandardLevel(level?: number): 1 | 2 | 3 {
+  if (level == null) {
+    throw new Error("level is required when mode is standard");
+  }
+
+  if (level !== 1 && level !== 2 && level !== 3) {
+    throw new Error("level must be 1, 2, or 3 when mode is standard");
+  }
+
+  return level;
+}
+
 export function normalizeMode(mode: string, level?: number): string {
   if (mode === "standard") {
-    return `standard_level_${level ?? 1}`;
+    return `standard_level_${normalizeStandardLevel(level)}`;
   }
   if (mode.startsWith("standard_level_")) {
+    const parsedLevel = Number(mode.replace("standard_level_", ""));
+    normalizeStandardLevel(parsedLevel);
     return mode;
   }
   if (mode.startsWith("custom_list_") || mode === "custom") {
@@ -353,6 +367,7 @@ export async function recordWordAttemptInDB(
   targetWord: string,
   childAttempt: string,
   isCorrect: boolean,
+  mode: string,
   level?: number,
   definitionViewed?: boolean,
   exampleViewed?: boolean,
@@ -360,7 +375,6 @@ export async function recordWordAttemptInDB(
   partOfSpeechViewed?: boolean,
   repeatWordCount?: number,
   usedVoiceInput?: boolean,
-  mode: string = "standard",
   coachingResponse?: string,
 ) {
   const userClient = getSupabaseUserClient(authToken);

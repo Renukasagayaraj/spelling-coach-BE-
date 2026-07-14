@@ -493,6 +493,7 @@ export class MockBeeService {
       turn.word.word,
       parsed.childAttempt,
       Boolean(turn.isCorrect),
+      "mock_bee",
       undefined,
       parsed.supportsUsed?.definitionViewed,
       parsed.supportsUsed?.exampleViewed,
@@ -500,7 +501,6 @@ export class MockBeeService {
       false,
       0,
       false,
-      "mock_bee",
     );
     this.advanceSession(session);
     this.startReviewGeneration(authToken, userId, session, turn);
@@ -555,6 +555,7 @@ export class MockBeeService {
       turn.word.word,
       "",
       false,
+      "mock_bee",
       undefined,
       false,
       false,
@@ -562,7 +563,6 @@ export class MockBeeService {
       false,
       0,
       false,
-      "mock_bee",
     );
     this.advanceSession(session);
     this.startReviewGeneration(authToken, userId, session, turn);

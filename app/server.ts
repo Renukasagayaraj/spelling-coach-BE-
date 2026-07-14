@@ -501,6 +501,11 @@ export default async function handler(
         coachingResponse,
       } = JSON.parse(rawBody);
 
+      if (!mode) {
+        sendJson(response, 400, { error: "mode is required" });
+        return;
+      }
+
       const attemptId = await recordWordAttemptInDB(
         authHeader,
         user.id,
@@ -508,6 +513,7 @@ export default async function handler(
         targetWord,
         childAttempt,
         isCorrect,
+        mode,
         level,
         definitionViewed,
         exampleViewed,
@@ -515,7 +521,6 @@ export default async function handler(
         partOfSpeechViewed,
         repeatWordCount,
         usedVoiceInput,
-        mode || "standard",
         coachingResponse,
       );
 
