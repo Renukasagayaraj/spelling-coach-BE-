@@ -396,7 +396,7 @@ function hydrateMockBeeSession(row: DBMockBeeSessionRow): MockBeeSession {
       word: turn.word ?? configWords[index],
     })),
     currentTurnIndex: state.currentTurnIndex ?? 0,
-    status: state.status ?? "active",
+    status: state.status ?? (row.status === "active" ? "active" : "completed"),
   };
 }
 
@@ -561,6 +561,7 @@ export class MockBeeService {
     const endedAt = isSessionCompleted ? new Date().toISOString() : null;
     const updatedRow = await updateMockBeeSessionInDB(authToken, userId, sessionId, {
       session_state: buildMockBeeSessionState(session),
+      status: isSessionCompleted ? "completed" : "active",
       total_words_attempted: buildProgress(session).answeredCount,
       total_correct: buildProgress(session).correctCount,
       session_ended_at: endedAt,
@@ -623,6 +624,7 @@ export class MockBeeService {
     const endedAt = isSessionCompleted ? new Date().toISOString() : null;
     const updatedRow = await updateMockBeeSessionInDB(authToken, userId, sessionId, {
       session_state: buildMockBeeSessionState(session),
+      status: isSessionCompleted ? "completed" : "active",
       total_words_attempted: buildProgress(session).answeredCount,
       total_correct: buildProgress(session).correctCount,
       session_ended_at: endedAt,
@@ -655,11 +657,13 @@ export class MockBeeService {
     }
 
     const endedAt = new Date().toISOString();
+    const answeredAll = session.turns.every((entry) => entry.status !== "pending");
     session.status = "completed";
     session.updatedAt = endedAt;
 
     const updatedRow = await updateMockBeeSessionInDB(authToken, userId, sessionId, {
       session_state: buildMockBeeSessionState(session),
+      status: answeredAll ? "completed" : "abandoned",
       total_words_attempted: buildProgress(session).answeredCount,
       total_correct: buildProgress(session).correctCount,
       session_ended_at: endedAt,

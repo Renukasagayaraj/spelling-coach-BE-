@@ -336,6 +336,8 @@ export type StartPracticeSessionResult =
       activeMode: string;
     };
 
+export type PracticeSessionStatus = "active" | "completed" | "abandoned";
+
 function calculateSessionDurationSeconds(sessionStartedAt: string, sessionEndedAt: string) {
   const startedAtMs = new Date(sessionStartedAt).getTime();
   const endedAtMs = new Date(sessionEndedAt).getTime();
@@ -356,6 +358,7 @@ async function forceCloseActiveSessionInDB(
     total_words_attempted: number | null;
     total_correct: number | null;
   },
+  status: Extract<PracticeSessionStatus, "completed" | "abandoned">,
 ) {
   const endedAt = new Date().toISOString();
   const durationSeconds = calculateSessionDurationSeconds(
@@ -366,6 +369,7 @@ async function forceCloseActiveSessionInDB(
   const { error: endError } = await userClient
     .from("practice_sessions")
     .update({
+      status,
       session_ended_at: endedAt,
       duration_seconds: durationSeconds,
       total_words_attempted: activeSession.total_words_attempted || 0,
@@ -398,6 +402,7 @@ export async function startPracticeSessionInDB(
     .from("practice_sessions")
     .select("id, mode, origin_language, custom_list_id, session_started_at, total_words_attempted, total_correct")
     .eq("user_id", userId)
+    .eq("status", "active")
     .is("session_ended_at", null)
     .order("session_started_at", { ascending: false })
     .limit(1)
@@ -430,7 +435,7 @@ export async function startPracticeSessionInDB(
       session_started_at: activeSession.session_started_at as string,
       total_words_attempted: activeSession.total_words_attempted as number | null,
       total_correct: activeSession.total_correct as number | null,
-    });
+    }, "abandoned");
   }
 
   const { data, error } = await userClient
@@ -438,6 +443,7 @@ export async function startPracticeSessionInDB(
     .insert({
       user_id: userId,
       mode: scope.dbMode,
+      status: "active",
       origin_language: scope.originLanguage,
       custom_list_id: scope.customListId,
       custom_list_name: scope.customListName,
@@ -605,6 +611,7 @@ export async function endPracticeSessionInDB(
   const { error } = await userClient
     .from("practice_sessions")
     .update({
+      status: "completed",
       session_ended_at: new Date().toISOString(),
       total_words_attempted: totalWordsAttempted,
       total_correct: totalCorrect,
@@ -652,6 +659,25 @@ export async function getSessionAttemptsFromDB(
     .eq("session_id", sessionId)
     .eq("user_id", userId)
     .order("created_at", { ascending: true });
+
+  if (error) {
+    throw error;
+  }
+  return data;
+}
+
+export async function getPracticeSessionFromDB(
+  authToken: string,
+  userId: string,
+  sessionId: string,
+) {
+  const userClient = getSupabaseUserClient(authToken);
+  const { data, error } = await userClient
+    .from("practice_sessions")
+    .select("id, mode, status, session_started_at, session_ended_at, origin_language, custom_list_id, custom_list_name")
+    .eq("id", sessionId)
+    .eq("user_id", userId)
+    .maybeSingle();
 
   if (error) {
     throw error;
@@ -718,6 +744,7 @@ export interface DBMockBeeSessionRow {
   id: string;
   user_id: string;
   mode: "mock_bee";
+  status: PracticeSessionStatus;
   session_started_at: string;
   session_ended_at: string | null;
   total_words_attempted: number | null;
@@ -741,6 +768,7 @@ export async function createMockBeeSessionInDB(
     .insert({
       user_id: userId,
       mode: "mock_bee",
+      status: "active",
       session_started_at: new Date().toISOString(),
       session_config: sessionConfig,
       session_state: sessionState,
@@ -780,6 +808,7 @@ export async function updateMockBeeSessionInDB(
   updates: {
     session_state?: unknown;
     session_config?: unknown;
+    status?: PracticeSessionStatus;
     total_words_attempted?: number;
     total_correct?: number;
     session_ended_at?: string | null;
@@ -814,6 +843,7 @@ export async function startMockBeeSessionInDB(
     .from("practice_sessions")
     .select("id, mode, session_started_at, total_words_attempted, total_correct")
     .eq("user_id", userId)
+    .eq("status", "active")
     .is("session_ended_at", null)
     .order("session_started_at", { ascending: false })
     .limit(1)
@@ -844,7 +874,7 @@ export async function startMockBeeSessionInDB(
       session_started_at: activeSession.session_started_at as string,
       total_words_attempted: activeSession.total_words_attempted as number | null,
       total_correct: activeSession.total_correct as number | null,
-    });
+    }, "abandoned");
   }
 
   const { data, error } = await userClient
@@ -852,6 +882,7 @@ export async function startMockBeeSessionInDB(
     .insert({
       user_id: userId,
       mode: "mock_bee",
+      status: "active",
       session_started_at: new Date().toISOString(),
       session_config: sessionConfig,
       session_state: sessionState,

@@ -16,6 +16,7 @@ import {
   endPracticeSessionInDB,
   getUserStatisticsInDB,
   getSessionAttemptsFromDB,
+  getPracticeSessionFromDB,
   getUserSubscriptionFromDB,
   updateUserSubscriptionInDB,
   type DBCustomList,
@@ -456,6 +457,19 @@ export default async function handler(
         };
       });
       sendJson(response, 200, { attempts: enrichedAttempts });
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/sessions/current") {
+      const user = await authenticateRequest(request);
+      const authHeader = request.headers.authorization || "";
+      const sessionId = url.searchParams.get("sessionId");
+      if (!sessionId) {
+        sendJson(response, 400, { error: "Missing sessionId query parameter" });
+        return;
+      }
+      const session = await getPracticeSessionFromDB(authHeader, user.id, sessionId);
+      sendJson(response, 200, { session });
       return;
     }
 
