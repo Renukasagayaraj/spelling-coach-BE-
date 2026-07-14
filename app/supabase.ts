@@ -150,12 +150,21 @@ function buildModeKeyFromSessionRow(session: {
   });
 }
 
+function getStatisticsLevel(dbMode: string): number | null {
+  if (dbMode.startsWith("standard_level_")) {
+    return Number(dbMode.replace("standard_level_", ""));
+  }
+
+  return null;
+}
+
 
 export interface DBCustomList {
   id: string;
   name: string;
   owner_user_id: string;
   words: WordEntry[];
+  word_count?: number;
   created_at?: string;
 }
 
@@ -215,6 +224,7 @@ export async function saveCustomListToDB(
     name,
     owner_user_id: userId,
     words,
+    word_count: words.length,
   };
 
   if (listId) {
@@ -224,7 +234,7 @@ export async function saveCustomListToDB(
   const { data, error } = await userClient
     .from("custom_word_lists")
     .upsert(payload)
-    .select("id, name, words")
+    .select("id, name, words, word_count")
     .single();
 
   if (error) {
@@ -465,6 +475,7 @@ export async function recordWordAttemptInDB(
 ) {
   const userClient = getSupabaseUserClient(authToken);
   const scope = resolvePracticeScope(mode, level);
+  const statsLevel = getStatisticsLevel(scope.dbMode);
   const { data, error } = await userClient
     .from("word_attempts")
     .insert({
@@ -513,8 +524,13 @@ export async function recordWordAttemptInDB(
     .from("user_statistics")
     .select("current_streak, best_streak, total_attempts, correct_attempts")
     .eq("user_id", userId)
-    .eq("mode", scope.dbMode)
-    .is("level", null);
+    .eq("mode", scope.dbMode);
+
+  if (statsLevel == null) {
+    query = query.is("level", null);
+  } else {
+    query = query.eq("level", statsLevel);
+  }
 
   if (scope.originLanguage) {
     query = query.eq("origin_language", scope.originLanguage);
@@ -553,7 +569,7 @@ export async function recordWordAttemptInDB(
     .upsert({
       user_id: userId,
       mode: scope.dbMode,
-      level: null,
+      level: statsLevel,
       origin_language: scope.originLanguage,
       custom_list_id: scope.customListId,
       total_attempts: nextAttempts,
