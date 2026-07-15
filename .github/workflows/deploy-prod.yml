@@ -9,8 +9,28 @@ on:
         type: string
 
 jobs:
+  sast:
+    name: Security Scan (SAST)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Run SAST Scan
+        run: npm audit --audit-level=critical
+
   test:
     name: Run Unit Tests
+    needs: sast
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code

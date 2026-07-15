@@ -813,7 +813,6 @@ export default async function handler(
         },
         importedCount: result.importedCount,
         skippedExistingCount: result.skippedExistingCount,
-        words: savedList.words.map((word) => buildWordResponse(word)),
       });
       return;
     }
