@@ -68,6 +68,7 @@ jobs:
           [ -z "${{ secrets.DEV_LANGFUSE_PUBLIC_KEY }}" ] && MISSING="$MISSING DEV_LANGFUSE_PUBLIC_KEY"
           [ -z "${{ secrets.DEV_LANGFUSE_SECRET_KEY }}" ] && MISSING="$MISSING DEV_LANGFUSE_SECRET_KEY"
           [ -z "${{ secrets.DEV_LANGFUSE_BASE_URL }}" ] && MISSING="$MISSING DEV_LANGFUSE_BASE_URL"
+          [ -z "${{ secrets.DEV_DB_PASSWORD }}" ] && MISSING="$MISSING DEV_DB_PASSWORD"
           
           if [ -n "$MISSING" ]; then
             echo "::error::Missing GitHub Secrets:$MISSING"
@@ -110,11 +111,9 @@ jobs:
           SUPABASE_PUBLISHABLE_KEY: ${{ secrets.DEV_SUPABASE_PUBLISHABLE_KEY }}
           STRIPE_SECRET_KEY: ${{ secrets.DEV_STRIPE_SECRET_KEY }}
           STRIPE_PRICE_ID: ${{ secrets.DEV_STRIPE_PRICE_ID }}
-          STRIPE_WEBHOOK_SECRET: ${{ secrets.DEV_STRIPE_WEBHOOK_SECRET }}
           LANGFUSE_PUBLIC_KEY: ${{ secrets.DEV_LANGFUSE_PUBLIC_KEY }}
           LANGFUSE_SECRET_KEY: ${{ secrets.DEV_LANGFUSE_SECRET_KEY }}
           LANGFUSE_BASE_URL: ${{ secrets.DEV_LANGFUSE_BASE_URL }}
-          BETTERSTACK_SOURCE_TOKEN: ${{ secrets.DEV_BETTERSTACK_SOURCE_TOKEN }}
 
       - name: Deploy Project Artifacts to Vercel
         id: deploy
@@ -126,11 +125,9 @@ jobs:
             --env SUPABASE_PUBLISHABLE_KEY="${{ secrets.DEV_SUPABASE_PUBLISHABLE_KEY }}" \
             --env STRIPE_SECRET_KEY="${{ secrets.DEV_STRIPE_SECRET_KEY }}" \
             --env STRIPE_PRICE_ID="${{ secrets.DEV_STRIPE_PRICE_ID }}" \
-            --env STRIPE_WEBHOOK_SECRET="${{ secrets.DEV_STRIPE_WEBHOOK_SECRET }}" \
             --env LANGFUSE_PUBLIC_KEY="${{ secrets.DEV_LANGFUSE_PUBLIC_KEY }}" \
             --env LANGFUSE_SECRET_KEY="${{ secrets.DEV_LANGFUSE_SECRET_KEY }}" \
-            --env LANGFUSE_BASE_URL="${{ secrets.DEV_LANGFUSE_BASE_URL }}" \
-            --env BETTERSTACK_SOURCE_TOKEN="${{ secrets.DEV_BETTERSTACK_SOURCE_TOKEN }}")
+            --env LANGFUSE_BASE_URL="${{ secrets.DEV_LANGFUSE_BASE_URL }}")
           echo "DEPLOY_URL=$DEPLOY_URL" >> $GITHUB_ENV
         env:
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
