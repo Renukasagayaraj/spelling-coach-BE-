@@ -5,6 +5,7 @@ import {
   buildStoredSayAloudTip,
   deriveFriendlyPronunciationChunks,
 } from "../app/friendlyPronunciation.js";
+import { derivePhonemeTeachingFacts } from "../app/phonemeTeachingFacts.js";
 import { auditFriendlyPronunciation } from "../app/pronunciationConfidence.js";
 import { getSoundAwareMatchedPatterns } from "../app/soundAwarePatterns.js";
 import { loadCustomWordLists, saveCustomWordLists } from "../app/wordCatalog.js";
@@ -76,6 +77,8 @@ async function main(): Promise<void> {
       words: list.words.map((entry) => {
         const phonemes = phonemesByWord[entry.word.trim().toLowerCase()] ?? [];
         const friendlyChunks = deriveFriendlyPronunciationChunks(phonemes);
+        const soundAwarePatterns = getSoundAwareMatchedPatterns(entry.word, phonemes);
+        const teachingFacts = derivePhonemeTeachingFacts(entry.word, phonemes);
         const sayAloudTip = buildStoredSayAloudTip(
           entry.word,
           phonemes,
@@ -87,6 +90,8 @@ async function main(): Promise<void> {
             source: "g2p-en",
             phonemes,
             sound_aware_patterns: [],
+            silent_letters: teachingFacts.silentLetters,
+            tricky_parts: teachingFacts.trickyParts,
             friendly_chunks: friendlyChunks,
             say_aloud_tip: sayAloudTip,
           },
@@ -100,7 +105,9 @@ async function main(): Promise<void> {
           phoneme_metadata: {
             source: "g2p-en" as const,
             phonemes,
-            sound_aware_patterns: getSoundAwareMatchedPatterns(entry.word, phonemes),
+            sound_aware_patterns: soundAwarePatterns,
+            silent_letters: teachingFacts.silentLetters,
+            tricky_parts: teachingFacts.trickyParts,
             friendly_chunks: friendlyChunks,
             say_aloud_tip: sayAloudTip,
             pronunciation_confidence: pronunciationConfidence,

@@ -2,10 +2,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   buildSpellingCoachInput,
+  buildDetailedWordResponse,
   buildWordPrecomputeInput,
   buildWordResponse,
   LevelQuerySchema,
   maskWordInExampleSentence,
+  WordSearchQuerySchema,
 } from "./inputBuilder.js";
 import {
   normalizeSpellingCoachOutputChunkReason,
@@ -18,6 +20,7 @@ import {
   deriveFriendlyPronunciation,
   getFriendlyPronunciationCue,
 } from "./friendlyPronunciation.js";
+import { derivePhonemeTeachingFacts } from "./phonemeTeachingFacts.js";
 import { buildDefaultTtsInstructions } from "./pronunciation.js";
 import {
   auditFriendlyPronunciation,
@@ -27,6 +30,7 @@ import {
   applyNewPatternsToOutput,
   getNewMatchedPatterns,
 } from "./newPatternMatcher.js";
+import { normalizeMissAnalysisErrorTypes } from "./missAnalysis.js";
 import { getSoundAwareMatchedPatterns } from "./soundAwarePatterns.js";
 import { importCustomWords } from "./customWordImport.js";
 import { importForeignOriginWords } from "./foreignOriginImport.js";
@@ -67,6 +71,7 @@ import {
   listCustomWordListsForUser,
   loadCustomWordLists,
   loadForeignOriginWordLists,
+  searchWords,
   saveForeignOriginWordLists,
   pickNextWord,
   saveCustomWordLists,
@@ -94,7 +99,9 @@ function makeOutput(overrides: OutputOverrides): SpellingCoachOutput {
     },
     missAnalysis: {
       summary: "",
-      errorTypes: [],
+      primaryErrorType: null,
+      secondaryErrorTypes: [],
+      errorTypeEvidence: {},
       primaryErrorFocus: "",
       likelyWrongWordInterpretation: false,
       usedMeaningDisambiguationWell: false,
@@ -429,7 +436,12 @@ test("handles adscititious missing-letter near miss", async () => {
   const expected = makeOutput({
     missAnalysis: {
       summary: "Very close. The attempt drops the s in the sc cluster near the start of the word.",
-      errorTypes: ["missing-letter deletion", "consonant cluster omission"],
+      primaryErrorType: "missing_letter",
+      secondaryErrorTypes: ["consonant_cluster_error"],
+      errorTypeEvidence: {
+        missing_letter: "A required letter is missing from the attempt.",
+        consonant_cluster_error: "The early consonant cluster is incomplete in the attempt.",
+      },
       primaryErrorFocus: "Remember the sc cluster in ad + scititious.",
     },
     errorRelevance: {
@@ -514,7 +526,12 @@ test("handles arachnophagous with heavy phonetic simplification", async () => {
   const expected = makeOutput({
     missAnalysis: {
       summary: "The attempt is phonetic and swaps several learned patterns for simpler sounds.",
-      errorTypes: ["phonetic substitution", "pattern reduction"],
+      primaryErrorType: "phonetic_spelling",
+      secondaryErrorTypes: ["pattern_rule_mismatch"],
+      errorTypeEvidence: {
+        phonetic_spelling: "The child wrote a sound-based approximation instead of the conventional spelling.",
+        pattern_rule_mismatch: "Learned spelling patterns were simplified in the attempt.",
+      },
       primaryErrorFocus: "Use the stored patterns ch and ph instead of writing only the sounds you hear.",
     },
     wordTeaching: {
@@ -622,7 +639,9 @@ test("reinforces a correct spelling without over-teaching", async () => {
     },
     missAnalysis: {
       summary: "The word was spelled correctly.",
-      errorTypes: [],
+      primaryErrorType: null,
+      secondaryErrorTypes: [],
+      errorTypeEvidence: {},
       primaryErrorFocus: "Accurate spelling",
       usedMeaningDisambiguationWell: true,
     },
@@ -666,7 +685,8 @@ test("reinforces a correct spelling without over-teaching", async () => {
 
   assert.equal(result.correctness.isCorrect, true);
   assert.equal(result.correctness.reinforceSuccess, true);
-  assert.equal(result.missAnalysis.errorTypes.length, 0);
+  assert.equal(result.missAnalysis.primaryErrorType, null);
+  assert.deepEqual(result.missAnalysis.secondaryErrorTypes, []);
   assert.equal(result.coachingText.fullExplanation, "");
 });
 
@@ -810,7 +830,12 @@ test("handles fictitious with missing middle chunk", async () => {
   const expected = makeOutput({
     missAnalysis: {
       summary: "The ending was started correctly, but the middle ti chunk disappeared.",
-      errorTypes: ["missing chunk", "ending compression"],
+      primaryErrorType: "chunk_mismatch",
+      secondaryErrorTypes: ["ending_confusion"],
+      errorTypeEvidence: {
+        chunk_mismatch: "A larger chunk from the word is missing in the attempt.",
+        ending_confusion: "The ending was compressed rather than preserved accurately.",
+      },
       primaryErrorFocus: "Keep the full ti + tious ending instead of shrinking it to tous.",
     },
     wordTeaching: {
@@ -908,7 +933,9 @@ test("retries when the model returns the wrong JSON shape first", async () => {
     },
     missAnalysis: {
       summary: "The word was spelled correctly.",
-      errorTypes: [],
+      primaryErrorType: null,
+      secondaryErrorTypes: [],
+      errorTypeEvidence: {},
       primaryErrorFocus: "Accurate spelling",
       usedMeaningDisambiguationWell: true,
     },
@@ -1538,6 +1565,29 @@ test("allows a longer memory tip for Level 3 miss-only prompts", () => {
     ),
     true,
   );
+  assert.equal(
+    missOnlyPrompt.includes(
+      "Do not use phrases like 'the child wrote', 'the child added', or 'the child substituted' in miss analysis text.",
+    ),
+    false,
+  );
+  assert.equal(
+    missOnlyPrompt.includes(
+      "Never mention field names, keys, or booleans such as rawSignals, substitutedLetters, extraLetters, repeatedLetterIssue, likelyChunks, detectedPatterns, true, or false.",
+    ),
+    false,
+  );
+  assert.equal(
+    missOnlyPrompt.includes(
+      "Independently judge missAnalysis.likelyWrongWordInterpretation by asking whether the attempt itself is another real word or a real related word-form.",
+    ),
+    true,
+  );
+  assert.equal(missOnlyPrompt.includes("wrongWordInterpretationHints"), true);
+  assert.equal(
+    missOnlyPrompt.includes("\"substantialStructuralOverlap\""),
+    true,
+  );
 });
 
 test("supports direct runtime path with the same validated output", async () => {
@@ -1586,7 +1636,9 @@ test("supports direct runtime path with the same validated output", async () => 
     },
     missAnalysis: {
       summary: "The word was spelled correctly.",
-      errorTypes: [],
+      primaryErrorType: null,
+      secondaryErrorTypes: [],
+      errorTypeEvidence: {},
       primaryErrorFocus: "Accurate spelling",
       usedMeaningDisambiguationWell: true,
     },
@@ -1631,6 +1683,90 @@ test("supports direct runtime path with the same validated output", async () => 
 
   assert.equal(result.correctness.isCorrect, true);
   assert.equal(result.teachingDecision.strategy, "pattern");
+});
+
+test("builds structural wrong-word interpretation hints for consternation -> constellation", () => {
+  const input: SpellingCoachInput = {
+    targetWord: "consternation",
+    childAttempt: "constellation",
+    childProfile: baseProfile,
+    wordMetadata: {
+      definition: "a feeling of worry or confusion.",
+      origin: "Latin",
+      partOfSpeech: "noun",
+      exampleSentence: "The sudden noise caused consternation in the room.",
+    },
+    missSignals: {
+      isCorrect: false,
+      nearMiss: false,
+      missingLetters: [],
+      extraLetters: [],
+      substitutedLetters: ["l for r", "l for n"],
+      transposedLetters: [],
+      repeatedLetterIssue: true,
+      likelyRushed: false,
+      editDistance: 3,
+    },
+    structuralHints: {
+      syllables: ["con", "ster", "na", "tion"],
+      likelyChunks: ["con", "stern", "ation"],
+      detectedPatterns: ["tion"],
+      likelySuffix: "ation",
+    },
+    sessionContext: {
+      mode: "practice",
+      previousAttemptsOnThisWord: 0,
+      previousMissPatterns: [],
+      recentlyPracticedWords: [],
+    },
+  };
+
+  const missOnlyPrompt = buildMissOnlyPrompt(
+    input,
+    JSON.stringify(
+      {
+        wordTeaching: {
+          conceptTeaching: {
+            summary: "",
+            meaningFocus: "",
+            originFocus: "",
+            morphologyFocus: "",
+            originLabels: [],
+            morphologyLabels: [],
+          },
+        },
+        wordBreakdown: {
+          displayChunks: ["con", "stern", "ation"],
+          alternateDisplayChunks: [],
+          chunkReason: "",
+          matchedPatterns: [],
+        },
+        conceptLabels: {
+          originLabels: [],
+          patternLabels: [],
+          morphologyLabels: [],
+        },
+      },
+      null,
+      2,
+    ),
+  );
+
+  const evidenceMatch = missOnlyPrompt.match(
+    /Deterministic miss evidence JSON:\n\n([\s\S]*?)\n\nPrecomputed word-level teaching JSON:/,
+  );
+  assert.equal(Boolean(evidenceMatch), true);
+
+  const evidence = JSON.parse(evidenceMatch?.[1] ?? "{}");
+  const hints = evidence.wrongWordInterpretationHints;
+
+  assert.equal(hints.targetNormalized, "consternation");
+  assert.equal(hints.attemptNormalized, "constellation");
+  assert.equal(hints.sharedPrefixLength >= 6, true);
+  assert.equal(hints.sharedSuffixLength >= 5, true);
+  assert.equal(hints.longestCommonSubsequenceRatio >= 0.75, true);
+  assert.equal(hints.bigramOverlapRatio >= 0.6, true);
+  assert.equal(hints.substantialStructuralOverlap, true);
 });
 
 test("replaces generic precompute chunk reasoning with concrete chunk split", () => {
@@ -1706,6 +1842,87 @@ test("builds a coaching input from app-level request data", () => {
   assert.equal(input.missSignals.isCorrect, false);
   assert.equal(input.missSignals.editDistance > 0, true);
   assert.equal(input.wordMetadata?.definition?.includes("leave"), true);
+  assert.equal(
+    input.missSignals.wrongWordInterpretationHints?.targetNormalized,
+    "abandon",
+  );
+  assert.equal(
+    input.missSignals.deterministicLikelyWrongWordInterpretation,
+    false,
+  );
+});
+
+test("builds structured deterministic miss facts for dropped double letters", () => {
+  const input = buildSpellingCoachInput({
+    targetWord: "especially",
+    childAttempt: "especialy",
+    childProfile: {
+      childId: "c1",
+      age: 9,
+      grade: "4",
+      spellingLevel: "on-grade",
+    },
+    sessionContext: {
+      mode: "practice",
+      previousAttemptsOnThisWord: 0,
+      previousMissPatterns: [],
+      recentlyPracticedWords: [],
+    },
+  });
+
+  assert.equal(input.missSignals.repeatedLetterIssue, true);
+  assert.equal(input.missSignals.doubleLetterMismatch?.detected, true);
+  assert.deepEqual(input.missSignals.doubleLetterMismatch?.missingFromDouble, [
+    "l",
+  ]);
+});
+
+test("keeps vowel substitution pairs limited to true vowel-for-vowel changes", () => {
+  const input = buildSpellingCoachInput({
+    targetWord: "manufacture",
+    childAttempt: "manufakcher",
+    childProfile: {
+      childId: "c1",
+      age: 10,
+      grade: "5",
+      spellingLevel: "on-grade",
+    },
+    sessionContext: {
+      mode: "practice",
+      previousAttemptsOnThisWord: 0,
+      previousMissPatterns: [],
+      recentlyPracticedWords: [],
+    },
+  });
+
+  assert.deepEqual(input.missSignals.vowelSubstitutionPairs ?? [], []);
+});
+
+test("does not flag wrong-word interpretation for nonword chunk rewrites", () => {
+  const input = buildSpellingCoachInput({
+    targetWord: "manufacture",
+    childAttempt: "manufakcher",
+    childProfile: {
+      childId: "c1",
+      age: 10,
+      grade: "5",
+      spellingLevel: "on-grade",
+    },
+    sessionContext: {
+      mode: "practice",
+      previousAttemptsOnThisWord: 0,
+      previousMissPatterns: [],
+      recentlyPracticedWords: [],
+    },
+  });
+
+  assert.equal(
+    input.missSignals.deterministicLikelyWrongWordInterpretation,
+    false,
+  );
+  assert.equal(input.missSignals.chunkMismatchFacts?.[0]?.expectedChunk, "facture");
+  assert.equal(input.missSignals.chunkMismatchFacts?.[0]?.observedFragment, "fakcher");
+  assert.equal(input.missSignals.chunkMismatchFacts?.[0]?.phoneticRewrite, true);
 });
 
 test("builds a public word response from generated word data", () => {
@@ -1717,6 +1934,26 @@ test("builds a public word response from generated word data", () => {
   assert.equal(response.level, word.level);
   assert.equal(typeof response.definition, "string");
   assert.equal(response.exampleSentence.toLowerCase().includes("phlox"), false);
+});
+
+test("builds a detailed word response with offline precomputed metadata", () => {
+  const word = getWordByText("dentifrice");
+  assert.ok(word);
+
+  const response = buildDetailedWordResponse(word);
+  assert.equal(response.word, "dentifrice");
+  assert.equal(response.definition.includes("toothpaste"), true);
+  assert.equal(response.exampleSentence.includes("dentifrice"), true);
+  assert.deepEqual(response.wordBreakdown?.displayChunks, ["dent", "i", "frice"]);
+  assert.equal(response.wordBreakdown?.matchedPatterns.length, 4);
+  assert.deepEqual(response.conceptLabels?.originLabels, ["Latin"]);
+  assert.equal(response.wordTeaching?.conceptTeaching.relatedForms.length, 0);
+  assert.equal(response.phonemeMetadata?.source, "g2p-en");
+  assert.equal(
+    response.phonemeMetadata?.sayAloudTip,
+    "Say it slowly: DEN-tuh-fruhs.\nThe final e is there, but the i does not say its name.",
+  );
+  assert.equal(response.phonemeMetadata?.trickyParts[0]?.soundsLike, "s");
 });
 
 test("masks the target word in example sentences for UI responses", () => {
@@ -1754,6 +1991,48 @@ test("masks contained word forms in definitions for UI responses", () => {
     response.definition,
     "A type of cheese from *****, England.",
   );
+});
+
+test("parses word search query defaults and guardrails", () => {
+  const query = WordSearchQuerySchema.parse({
+    q: "dent",
+  });
+
+  assert.equal(query.mode, "startsWith");
+  assert.equal(query.limit, 20);
+});
+
+test("rejects too-short word search queries", () => {
+  assert.throws(() => {
+    WordSearchQuerySchema.parse({
+      q: "d",
+      mode: "contains",
+    });
+  });
+});
+
+test("finds words by startsWith search", () => {
+  const results = searchWords("dent", "startsWith", 10);
+  assert.equal(results.some((entry) => entry.word === "dentifrice"), true);
+  assert.equal(
+    results.every((entry) => entry.word.toLowerCase().startsWith("dent")),
+    true,
+  );
+});
+
+test("finds words by contains search", () => {
+  const results = searchWords("frice", "contains", 10);
+  assert.equal(results.some((entry) => entry.word === "dentifrice"), true);
+});
+
+test("prioritizes exact matches in word search results", () => {
+  const results = searchWords("phlox", "contains", 10);
+  assert.equal(results[0]?.word, "phlox");
+});
+
+test("caps word search result count at requested limit", () => {
+  const results = searchWords("tion", "contains", 3);
+  assert.ok(results.length <= 3);
 });
 
 test("accepts explicit empty concept teaching fields when concept support is weak", async () => {
@@ -1800,7 +2079,11 @@ test("accepts explicit empty concept teaching fields when concept support is wea
       makeOutput({
         missAnalysis: {
           summary: "The second vowel was changed from i to e.",
-          errorTypes: ["short vowel confusion"],
+          primaryErrorType: "vowel_confusion",
+          secondaryErrorTypes: [],
+          errorTypeEvidence: {
+            vowel_confusion: "The attempt reflects the wrong vowel sound choice.",
+          },
           primaryErrorFocus: "Keep the short i in the second chunk.",
         },
         wordTeaching: {
@@ -1866,7 +2149,11 @@ test("supports unclear error relevance below the confidence threshold", async ()
       makeOutput({
         missAnalysis: {
           summary: "The child simplified ph to f.",
-          errorTypes: ["phonetic substitution"],
+          primaryErrorType: "phonetic_spelling",
+          secondaryErrorTypes: [],
+          errorTypeEvidence: {
+            phonetic_spelling: "The attempt was written more by sound than by standard spelling.",
+          },
           primaryErrorFocus: "Use ph for the f sound in this word.",
         },
         wordTeaching: {
@@ -1890,6 +2177,1863 @@ test("supports unclear error relevance below the confidence threshold", async ()
 
   assert.equal(result.errorRelevance.mostRelevantToError, "unclear");
   assert.equal(result.errorRelevance.confidence < 0.75, true);
+});
+
+test("prefers vowel confusion over letter substitution for vowel-for-vowel misses", async () => {
+  const input: SpellingCoachInput = {
+    targetWord: "turpentine",
+    childAttempt: "terpentine",
+    childProfile: baseProfile,
+    wordMetadata: {
+      definition: "a strong-smelling liquid from pine trees",
+      origin: "Greek",
+      partOfSpeech: "noun",
+      pronunciation: "TER-pin-teen",
+    },
+    missSignals: {
+      isCorrect: false,
+      nearMiss: true,
+      missingLetters: [],
+      extraLetters: [],
+      substitutedLetters: ["e for u"],
+      transposedLetters: [],
+      repeatedLetterIssue: false,
+      likelyRushed: false,
+      editDistance: 1,
+    },
+    structuralHints: {
+      syllables: ["tur", "pen", "tine"],
+      likelyChunks: ["tur", "pen", "tine"],
+      detectedPatterns: ["vowel change"],
+    },
+    sessionContext: {
+      mode: "practice",
+      previousAttemptsOnThisWord: 0,
+      previousMissPatterns: [],
+      recentlyPracticedWords: [],
+    },
+  };
+
+  const result = await runSpellingCoachAgent(input, {
+    agent: createMockAgent(
+      makeOutput({
+        missAnalysis: {
+          summary:
+            "The spelling uses 'e' instead of 'u' in the first syllable.",
+          primaryErrorType: "letter_substitution",
+          secondaryErrorTypes: [],
+          errorTypeEvidence: {
+            letter_substitution:
+              "The spelling substitutes one letter for another in the first syllable.",
+          },
+          primaryErrorFocus:
+            "Keep the vowel 'u' in the first syllable instead of changing it to 'e'.",
+        },
+      }),
+    ),
+  });
+
+  assert.equal(result.missAnalysis.primaryErrorType, "vowel_confusion");
+  assert.deepEqual(result.missAnalysis.secondaryErrorTypes, []);
+  assert.equal(
+    result.missAnalysis.errorTypeEvidence.vowel_confusion,
+    "The spelling substitutes one letter for another in the first syllable.",
+  );
+  assert.equal(
+    "letter_substitution" in result.missAnalysis.errorTypeEvidence,
+    false,
+  );
+});
+
+test("prefers vowel confusion when a 2-vowel span is transposed", async () => {
+  const input: SpellingCoachInput = {
+    targetWord: "friend",
+    childAttempt: "freind",
+    childProfile: baseProfile,
+    wordMetadata: {
+      definition: "a person you like and trust",
+      origin: "Old English",
+      partOfSpeech: "noun",
+      pronunciation: "frend",
+    },
+    missSignals: {
+      isCorrect: false,
+      nearMiss: true,
+      missingLetters: [],
+      extraLetters: [],
+      substitutedLetters: [],
+      transposedLetters: ["ie"],
+      repeatedLetterIssue: false,
+      likelyRushed: false,
+      editDistance: 1,
+    },
+    structuralHints: {
+      syllables: ["friend"],
+      likelyChunks: ["friend"],
+      detectedPatterns: ["ie/ei"],
+    },
+    sessionContext: {
+      mode: "practice",
+      previousAttemptsOnThisWord: 0,
+      previousMissPatterns: [],
+      recentlyPracticedWords: [],
+    },
+  };
+
+  const result = await runSpellingCoachAgent(input, {
+    agent: createMockAgent(
+      makeOutput({
+        missAnalysis: {
+          summary:
+            "The spelling uses the right letters in the vowel team, but they are not in the correct order.",
+          primaryErrorType: "letter_substitution",
+          secondaryErrorTypes: [],
+          errorTypeEvidence: {
+            letter_substitution:
+              "The spelling changes the letter sequence in the vowel team.",
+          },
+          primaryErrorFocus:
+            "Keep the letters in the vowel team in the correct order.",
+        },
+      }),
+    ),
+  });
+
+  assert.equal(result.missAnalysis.primaryErrorType, "vowel_confusion");
+  assert.equal(
+    result.missAnalysis.errorTypeEvidence.vowel_confusion,
+    "The spelling changes the letter sequence in the vowel team.",
+  );
+  assert.equal(
+    "letter_substitution" in result.missAnalysis.errorTypeEvidence,
+    false,
+  );
+});
+
+test("treats a 2-vowel transposed span as vowel confusion instead of letter transposition", () => {
+  const input: SpellingCoachInput = {
+    targetWord: "friend",
+    childAttempt: "freind",
+    childProfile: baseProfile,
+    wordMetadata: {
+      definition: "a person you like and trust",
+      origin: "Old English",
+      partOfSpeech: "noun",
+      pronunciation: "frend",
+    },
+    missSignals: {
+      isCorrect: false,
+      nearMiss: true,
+      missingLetters: [],
+      extraLetters: [],
+      substitutedLetters: [],
+      transposedLetters: ["ie"],
+      repeatedLetterIssue: false,
+      likelyRushed: false,
+      editDistance: 1,
+    },
+    structuralHints: {
+      syllables: ["friend"],
+      likelyChunks: ["friend"],
+      detectedPatterns: ["vowel team ie/ei"],
+    },
+    sessionContext: {
+      mode: "practice",
+      previousAttemptsOnThisWord: 0,
+      previousMissPatterns: [],
+      recentlyPracticedWords: [],
+    },
+  };
+
+  const result = normalizeMissAnalysisErrorTypes(
+    input,
+    makeOutput({
+      missAnalysis: {
+        summary: "The spelling swaps two letters in the vowel team.",
+        primaryErrorType: "letter_transposition",
+        secondaryErrorTypes: [],
+        errorTypeEvidence: {
+          letter_transposition:
+            "The vowel letters are in the wrong order in the team.",
+        },
+        primaryErrorFocus: "Keep the vowel team in the correct order.",
+      },
+    }),
+  );
+
+  assert.equal(result.missAnalysis.primaryErrorType, "vowel_confusion");
+  assert.equal(
+    result.missAnalysis.secondaryErrorTypes.includes("letter_transposition"),
+    false,
+  );
+});
+
+test("prefers double-letter error when the raw signals show a repeated-letter issue", async () => {
+  const input: SpellingCoachInput = {
+    targetWord: "accommodate",
+    childAttempt: "acommodate",
+    childProfile: baseProfile,
+    wordMetadata: {
+      definition: "to provide room or space for",
+      origin: "Latin",
+      partOfSpeech: "verb",
+      pronunciation: "uh-KAH-muh-date",
+    },
+    missSignals: {
+      isCorrect: false,
+      nearMiss: true,
+      missingLetters: ["c"],
+      extraLetters: [],
+      substitutedLetters: [],
+      transposedLetters: [],
+      repeatedLetterIssue: true,
+      likelyRushed: false,
+      editDistance: 1,
+    },
+    structuralHints: {
+      syllables: ["ac", "com", "mo", "date"],
+      likelyChunks: ["ac", "commodate"],
+      detectedPatterns: ["double consonant cc", "double consonant mm"],
+    },
+    sessionContext: {
+      mode: "practice",
+      previousAttemptsOnThisWord: 0,
+      previousMissPatterns: [],
+      recentlyPracticedWords: [],
+    },
+  };
+
+  const result = await runSpellingCoachAgent(input, {
+    agent: createMockAgent(
+      makeOutput({
+        missAnalysis: {
+          summary:
+            "The spelling leaves out one of the c letters near the start of the word.",
+          primaryErrorType: "missing_letter",
+          secondaryErrorTypes: [],
+          errorTypeEvidence: {
+            missing_letter:
+              "One required letter from the double consonant is missing.",
+          },
+          primaryErrorFocus:
+            "Keep both c letters together near the start of the word.",
+        },
+      }),
+    ),
+  });
+
+  assert.equal(result.missAnalysis.primaryErrorType, "double_letter_error");
+  assert.equal(
+    result.missAnalysis.errorTypeEvidence.double_letter_error,
+    "One required letter from the double consonant is missing.",
+  );
+  assert.equal(
+    "missing_letter" in result.missAnalysis.errorTypeEvidence,
+    true,
+  );
+});
+
+test("prefers double-letter error when one letter from a doubled pair is dropped", async () => {
+  const input: SpellingCoachInput = {
+    targetWord: "especially",
+    childAttempt: "especialy",
+    childProfile: baseProfile,
+    wordMetadata: {
+      definition: "more than usual; particularly",
+      origin: "Latin",
+      partOfSpeech: "adverb",
+      pronunciation: "ih-SPESH-uh-lee",
+    },
+    missSignals: {
+      isCorrect: false,
+      nearMiss: true,
+      missingLetters: ["l"],
+      extraLetters: [],
+      substitutedLetters: [],
+      transposedLetters: [],
+      repeatedLetterIssue: false,
+      doubleLetterMismatch: {
+        detected: true,
+        missingFromDouble: ["l"],
+        extraDouble: [],
+        affectedLetters: ["l"],
+      },
+      likelyRushed: true,
+      editDistance: 1,
+    },
+    structuralHints: {
+      syllables: ["es", "pe", "cial", "ly"],
+      likelyChunks: ["es", "pe", "cial", "ly"],
+      detectedPatterns: ["double consonant ll", "ending -ly"],
+    },
+    sessionContext: {
+      mode: "practice",
+      previousAttemptsOnThisWord: 0,
+      previousMissPatterns: [],
+      recentlyPracticedWords: [],
+    },
+  };
+
+  const result = await runSpellingCoachAgent(input, {
+    agent: createMockAgent(
+      makeOutput({
+        missAnalysis: {
+          summary:
+            "The spelling is missing one letter near the end of the word.",
+          primaryErrorType: "missing_letter",
+          secondaryErrorTypes: [],
+          errorTypeEvidence: {
+            missing_letter:
+              "One letter is missing near the final doubled consonant.",
+          },
+          primaryErrorFocus:
+            "Keep the final letters in the correct ending pattern.",
+        },
+      }),
+    ),
+  });
+
+  assert.equal(result.missAnalysis.primaryErrorType, "double_letter_error");
+  assert.equal(
+    result.missAnalysis.errorTypeEvidence.double_letter_error,
+    "One letter is missing near the final doubled consonant.",
+  );
+  assert.equal(
+    "missing_letter" in result.missAnalysis.errorTypeEvidence,
+    true,
+  );
+});
+
+test("does not prefer double-letter error for unrelated substitution misses", async () => {
+  const input: SpellingCoachInput = {
+    targetWord: "irrevocable",
+    childAttempt: "irrevokable",
+    childProfile: baseProfile,
+    wordMetadata: {
+      definition: "impossible to change or take back",
+      origin: "Latin",
+      partOfSpeech: "adjective",
+      pronunciation: "i-REV-uh-kuh-buhl",
+    },
+    missSignals: {
+      isCorrect: false,
+      nearMiss: true,
+      missingLetters: [],
+      extraLetters: [],
+      substitutedLetters: ["k for c"],
+      transposedLetters: [],
+      repeatedLetterIssue: true,
+      likelyRushed: false,
+      editDistance: 1,
+    },
+    structuralHints: {
+      syllables: ["ir", "rev", "o", "ca", "ble"],
+      likelyChunks: ["irr", "evo", "ca", "ble"],
+      detectedPatterns: ["double consonant rr", "ending -le"],
+    },
+    sessionContext: {
+      mode: "practice",
+      previousAttemptsOnThisWord: 0,
+      previousMissPatterns: [],
+      recentlyPracticedWords: [],
+    },
+  };
+
+  const result = await runSpellingCoachAgent(input, {
+    agent: createMockAgent(
+      makeOutput({
+        missAnalysis: {
+          summary:
+            "The spelling uses 'k' instead of 'c' in the middle of the word.",
+          primaryErrorType: "letter_substitution",
+          secondaryErrorTypes: [],
+          errorTypeEvidence: {
+            letter_substitution:
+              "The spelling replaces the expected 'c' with 'k' in the root part of the word.",
+          },
+          primaryErrorFocus:
+            "Keep the letter 'c' in the root part of the word instead of changing it to 'k'.",
+        },
+      }),
+    ),
+  });
+
+  assert.equal(result.missAnalysis.primaryErrorType, "letter_substitution");
+  assert.equal(
+    result.missAnalysis.errorTypeEvidence.letter_substitution,
+    "The spelling replaces the expected 'c' with 'k' in the root part of the word.",
+  );
+  assert.equal(
+    "double_letter_error" in result.missAnalysis.errorTypeEvidence,
+    false,
+  );
+});
+
+test("classifies irrevocabel as an ending confusion miss", async () => {
+  const input: SpellingCoachInput = {
+    targetWord: "irrevocable",
+    childAttempt: "irrevocabel",
+    childProfile: baseProfile,
+    wordMetadata: {
+      definition: "impossible to change or take back",
+      origin: "Latin",
+      partOfSpeech: "adjective",
+      pronunciation: "i-REV-uh-kuh-buhl",
+    },
+    missSignals: {
+      isCorrect: false,
+      nearMiss: true,
+      missingLetters: [],
+      extraLetters: [],
+      substitutedLetters: [],
+      transposedLetters: ["el"],
+      repeatedLetterIssue: true,
+      endingConfusionFacts: [
+        {
+          suffix: "able",
+          attemptedEnding: "abel",
+          phoneticRewrite: false,
+        },
+      ],
+      likelyRushed: true,
+      editDistance: 2,
+    },
+    structuralHints: {
+      syllables: ["ir", "rev", "o", "ca", "ble"],
+      likelyChunks: ["irr", "evo", "ca", "ble"],
+      detectedPatterns: ["double consonant rr", "ending -le"],
+    },
+    sessionContext: {
+      mode: "practice",
+      previousAttemptsOnThisWord: 0,
+      previousMissPatterns: [],
+      recentlyPracticedWords: [],
+    },
+  };
+
+  const result = await runSpellingCoachAgent(input, {
+    agent: createMockAgent(
+      makeOutput({
+        missAnalysis: {
+          summary:
+            "The spelling swaps the final two letters in the ending.",
+          primaryErrorType: "letter_substitution",
+          secondaryErrorTypes: ["likely_rushed"],
+          errorTypeEvidence: {
+            letter_substitution:
+              "The final two letters are reversed from 'le' to 'el'.",
+            likely_rushed:
+              "The attempt was likely rushed, contributing to the letter order mistake.",
+          },
+          primaryErrorFocus:
+            "Keep the ending letters in the correct order as 'le'.",
+        },
+      }),
+    ),
+  });
+
+  assert.equal(result.missAnalysis.primaryErrorType, "letter_transposition");
+  assert.equal(
+    result.missAnalysis.secondaryErrorTypes.includes("ending_confusion"),
+    true,
+  );
+  assert.equal(
+    result.missAnalysis.secondaryErrorTypes.includes("pattern_rule_mismatch"),
+    true,
+  );
+  assert.equal(
+    result.missAnalysis.errorTypeEvidence.letter_transposition,
+    "The final two letters are reversed from 'le' to 'el'.",
+  );
+});
+
+test("classifies errevocable as a vowel confusion miss", async () => {
+  const input: SpellingCoachInput = {
+    targetWord: "irrevocable",
+    childAttempt: "errevocable",
+    childProfile: baseProfile,
+    wordMetadata: {
+      definition: "impossible to change or take back",
+      origin: "Latin",
+      partOfSpeech: "adjective",
+      pronunciation: "i-REV-uh-kuh-buhl",
+    },
+    missSignals: {
+      isCorrect: false,
+      nearMiss: true,
+      missingLetters: [],
+      extraLetters: [],
+      substitutedLetters: ["e for i"],
+      transposedLetters: [],
+      repeatedLetterIssue: true,
+      likelyRushed: false,
+      editDistance: 1,
+    },
+    structuralHints: {
+      syllables: ["ir", "rev", "o", "ca", "ble"],
+      likelyChunks: ["irr", "evo", "ca", "ble"],
+      detectedPatterns: ["double consonant rr", "ending -le"],
+    },
+    sessionContext: {
+      mode: "practice",
+      previousAttemptsOnThisWord: 0,
+      previousMissPatterns: [],
+      recentlyPracticedWords: [],
+    },
+  };
+
+  const result = await runSpellingCoachAgent(input, {
+    agent: createMockAgent(
+      makeOutput({
+        missAnalysis: {
+          summary:
+            "The spelling uses 'e' instead of 'i' at the start of the word.",
+          primaryErrorType: "letter_substitution",
+          secondaryErrorTypes: [],
+          errorTypeEvidence: {
+            letter_substitution:
+              "The first letter changes from 'i' to 'e' in the prefix.",
+          },
+          primaryErrorFocus:
+            "Keep the first vowel as 'i' in the prefix 'ir-'.",
+        },
+      }),
+    ),
+  });
+
+  assert.equal(result.missAnalysis.primaryErrorType, "vowel_confusion");
+  assert.deepEqual(result.missAnalysis.secondaryErrorTypes, []);
+  assert.equal(
+    result.missAnalysis.errorTypeEvidence.vowel_confusion,
+    "The first letter changes from 'i' to 'e' in the prefix.",
+  );
+  assert.equal(
+    "letter_substitution" in result.missAnalysis.errorTypeEvidence,
+    false,
+  );
+});
+
+test("classifies known suffix endings gone wrong as ending confusion", async () => {
+  const input: SpellingCoachInput = {
+    targetWord: "requisition",
+    childAttempt: "requisishun",
+    childProfile: baseProfile,
+    wordMetadata: {
+      definition: "an official request for something needed",
+      origin: "Latin",
+      partOfSpeech: "noun",
+      pronunciation: "rek-wuh-ZI-shun",
+    },
+    missSignals: {
+      isCorrect: false,
+      nearMiss: false,
+      missingLetters: ["t", "i", "o"],
+      extraLetters: ["s", "h", "u"],
+      substitutedLetters: ["s for t", "h for i", "u for o"],
+      transposedLetters: [],
+      repeatedLetterIssue: false,
+      endingConfusionFacts: [
+        {
+          suffix: "ition",
+          attemptedEnding: "ishun",
+          phoneticRewrite: true,
+        },
+      ],
+      likelyRushed: false,
+      editDistance: 4,
+    },
+    structuralHints: {
+      syllables: ["re", "qui", "si", "tion"],
+      likelyChunks: ["requis", "ition"],
+      detectedPatterns: ["qu", "tion", "ition"],
+      likelySuffix: "ition",
+    },
+    sessionContext: {
+      mode: "practice",
+      previousAttemptsOnThisWord: 0,
+      previousMissPatterns: [],
+      recentlyPracticedWords: [],
+    },
+  };
+
+  const result = await runSpellingCoachAgent(input, {
+    agent: createMockAgent(
+      makeOutput({
+        missAnalysis: {
+          summary:
+            "The spelling writes the ending by sound instead of using the expected suffix letters.",
+          primaryErrorType: "letter_substitution",
+          secondaryErrorTypes: [],
+          errorTypeEvidence: {
+            letter_substitution:
+              "The ending letters were replaced with a sound-based spelling.",
+          },
+          primaryErrorFocus:
+            "Keep the expected ending letters in the suffix instead of writing them by sound.",
+        },
+      }),
+    ),
+  });
+
+  assert.equal(result.missAnalysis.primaryErrorType, "ending_confusion");
+  assert.equal(
+    result.missAnalysis.secondaryErrorTypes.includes("phonetic_spelling"),
+    true,
+  );
+  assert.equal(result.missAnalysis.errorTypeEvidence.ending_confusion.length > 0, true);
+});
+
+test("classifies missing plural ending as ending confusion", async () => {
+  const input = buildSpellingCoachInput({
+    targetWord: "anemometers",
+    childAttempt: "anemometer",
+    childProfile: {
+      childId: "c1",
+      age: 10,
+      grade: "5",
+      spellingLevel: "on-grade",
+    },
+    sessionContext: {
+      mode: "practice",
+      previousAttemptsOnThisWord: 0,
+      previousMissPatterns: [],
+      recentlyPracticedWords: [],
+    },
+  });
+
+  const result = normalizeMissAnalysisErrorTypes(
+    input,
+    makeOutput({
+      missAnalysis: {
+        summary: "The spelling is missing the final s.",
+        primaryErrorType: "missing_letter",
+        secondaryErrorTypes: ["likely_rushed"],
+        errorTypeEvidence: {
+          missing_letter: "The final letter is missing.",
+          likely_rushed: "The miss is short and at the end.",
+        },
+        primaryErrorFocus: "Add the final s.",
+        likelyWrongWordInterpretation: false,
+      },
+    }),
+  );
+
+  assert.equal(result.missAnalysis.primaryErrorType, "missing_letter");
+  assert.equal(
+    result.missAnalysis.secondaryErrorTypes.includes("pattern_rule_mismatch"),
+    true,
+  );
+  assert.equal(
+    result.missAnalysis.secondaryErrorTypes.includes("ending_confusion"),
+    true,
+  );
+});
+
+test("classifies missing past-tense ed ending as ending confusion", async () => {
+  const input: SpellingCoachInput = {
+    targetWord: "consented",
+    childAttempt: "consent",
+    childProfile: baseProfile,
+    wordMetadata: {
+      definition: "agreed or gave permission",
+      origin: "Latin",
+      partOfSpeech: "verb",
+      pronunciation: "kuhn-SEN-tid",
+    },
+    missSignals: {
+      isCorrect: false,
+      nearMiss: true,
+      missingLetters: ["e", "d"],
+      extraLetters: [],
+      substitutedLetters: [],
+      transposedLetters: [],
+      repeatedLetterIssue: false,
+      endingConfusionFacts: [
+        {
+          suffix: "ed",
+          attemptedEnding: "",
+          phoneticRewrite: false,
+        },
+      ],
+      likelyRushed: true,
+      editDistance: 2,
+    },
+    structuralHints: {
+      syllables: ["con", "sent", "ed"],
+      likelyChunks: ["con", "sent", "ed"],
+      detectedPatterns: ["ending -ed"],
+      likelySuffix: "ed",
+    },
+    sessionContext: {
+      mode: "practice",
+      previousAttemptsOnThisWord: 0,
+      previousMissPatterns: [],
+      recentlyPracticedWords: [],
+    },
+  };
+
+  const result = normalizeMissAnalysisErrorTypes(
+    input,
+    makeOutput({
+      missAnalysis: {
+        summary: "The spelling leaves off the ending.",
+        primaryErrorType: "missing_letter",
+        secondaryErrorTypes: ["likely_rushed"],
+        errorTypeEvidence: {
+          missing_letter: "The final letters are missing.",
+          likely_rushed: "The missing letters are at the end.",
+        },
+        primaryErrorFocus: "Keep the final ending.",
+        likelyWrongWordInterpretation: false,
+      },
+    }),
+  );
+
+  assert.equal(result.missAnalysis.primaryErrorType, "missing_letter");
+  assert.equal(
+    result.missAnalysis.secondaryErrorTypes.includes("pattern_rule_mismatch"),
+    true,
+  );
+  assert.equal(
+    result.missAnalysis.secondaryErrorTypes.includes("ending_confusion"),
+    true,
+  );
+});
+
+test("keeps extra_letter as a secondary signal for ending confusion with an inserted ending letter", () => {
+  const input = buildSpellingCoachInput({
+    targetWord: "flabbergast",
+    childAttempt: "flabberghast",
+    childProfile: {
+      childId: "c1",
+      age: 10,
+      grade: "5",
+      spellingLevel: "on-grade",
+    },
+    sessionContext: {
+      mode: "practice",
+      previousAttemptsOnThisWord: 0,
+      previousMissPatterns: [],
+      recentlyPracticedWords: [],
+    },
+  });
+
+  const result = normalizeMissAnalysisErrorTypes(
+    input,
+    makeOutput({
+      missAnalysis: {
+        summary: "An extra letter was added near the ending.",
+        primaryErrorType: "ending_confusion",
+        secondaryErrorTypes: ["ending_confusion", "pattern_rule_mismatch"],
+        errorTypeEvidence: {
+          ending_confusion: "The ending ast was spelled as hast.",
+          pattern_rule_mismatch: "The ending does not match the expected suffix pattern ast.",
+        },
+        primaryErrorFocus: "Remove the extra letter near the ending.",
+        likelyWrongWordInterpretation: false,
+      },
+    }),
+  );
+
+  assert.equal(result.missAnalysis.primaryErrorType, "extra_letter");
+  assert.equal(
+    result.missAnalysis.secondaryErrorTypes.includes("ending_confusion"),
+    true,
+  );
+  assert.equal(
+    result.missAnalysis.secondaryErrorTypes.includes("pattern_rule_mismatch"),
+    true,
+  );
+});
+
+test("prefers vowel confusion over ending confusion for a pure ending vowel swap", () => {
+  const input = buildSpellingCoachInput({
+    targetWord: "concatenate",
+    childAttempt: "concatinate",
+    childProfile: {
+      childId: "c1",
+      age: 10,
+      grade: "5",
+      spellingLevel: "on-grade",
+    },
+    sessionContext: {
+      mode: "practice",
+      previousAttemptsOnThisWord: 0,
+      previousMissPatterns: [],
+      recentlyPracticedWords: [],
+    },
+  });
+
+  const result = normalizeMissAnalysisErrorTypes(
+    input,
+    makeOutput({
+      missAnalysis: {
+        summary: "One vowel changed in the ending.",
+        primaryErrorType: "letter_substitution",
+        secondaryErrorTypes: [],
+        errorTypeEvidence: {
+          letter_substitution: "The ending changes one vowel.",
+        },
+        primaryErrorFocus: "Keep the vowel in the ending steady.",
+        likelyWrongWordInterpretation: false,
+      },
+    }),
+  );
+
+  assert.equal(result.missAnalysis.primaryErrorType, "vowel_confusion");
+  assert.equal(
+    result.missAnalysis.secondaryErrorTypes.includes("ending_confusion"),
+    true,
+  );
+  assert.equal(
+    result.missAnalysis.secondaryErrorTypes.includes("pattern_rule_mismatch"),
+    true,
+  );
+});
+
+test("keeps ending confusion primary when the ending miss combines substitution and omission", () => {
+  const input = buildSpellingCoachInput({
+    targetWord: "dentifrice",
+    childAttempt: "dentifris",
+    childProfile: {
+      childId: "c1",
+      age: 10,
+      grade: "5",
+      spellingLevel: "on-grade",
+    },
+    sessionContext: {
+      mode: "practice",
+      previousAttemptsOnThisWord: 0,
+      previousMissPatterns: [],
+      recentlyPracticedWords: [],
+    },
+  });
+
+  const result = normalizeMissAnalysisErrorTypes(
+    input,
+    makeOutput({
+      missAnalysis: {
+        summary: "The ending changed shape.",
+        primaryErrorType: "letter_substitution",
+        secondaryErrorTypes: [],
+        errorTypeEvidence: {
+          letter_substitution: "The ending changed shape.",
+        },
+        primaryErrorFocus: "Keep the ending intact.",
+        likelyWrongWordInterpretation: false,
+      },
+    }),
+  );
+
+  assert.equal(result.missAnalysis.primaryErrorType, "ending_confusion");
+  assert.equal(
+    result.missAnalysis.secondaryErrorTypes.includes("phonetic_spelling"),
+    true,
+  );
+  assert.equal(
+    result.missAnalysis.secondaryErrorTypes.includes("missing_letter"),
+    true,
+  );
+});
+
+test("suppresses transposition for one-edit final-e drops and prefers missing letter", () => {
+  const input = buildSpellingCoachInput({
+    targetWord: "stratosphere",
+    childAttempt: "stratospher",
+    childProfile: {
+      childId: "c1",
+      age: 10,
+      grade: "5",
+      spellingLevel: "on-grade",
+    },
+    sessionContext: {
+      mode: "practice",
+      previousAttemptsOnThisWord: 0,
+      previousMissPatterns: [],
+      recentlyPracticedWords: [],
+    },
+  });
+
+  const result = normalizeMissAnalysisErrorTypes(
+    input,
+    makeOutput({
+      missAnalysis: {
+        summary: "The final e is missing.",
+        primaryErrorType: "letter_substitution",
+        secondaryErrorTypes: [],
+        errorTypeEvidence: {
+          letter_substitution: "Fallback substitution evidence.",
+        },
+        primaryErrorFocus: "Keep the final letter.",
+        likelyWrongWordInterpretation: false,
+      },
+    }),
+  );
+
+  assert.equal(result.missAnalysis.primaryErrorType, "vowel_confusion");
+  assert.equal(
+    result.missAnalysis.secondaryErrorTypes.includes("ending_confusion"),
+    true,
+  );
+  assert.equal(
+    result.missAnalysis.secondaryErrorTypes.includes("missing_letter"),
+    true,
+  );
+  assert.equal(
+    result.missAnalysis.secondaryErrorTypes.includes("letter_transposition"),
+    false,
+  );
+});
+
+test("adds phonetic spelling for tion rewritten as shun", () => {
+  const input = buildSpellingCoachInput({
+    targetWord: "scintillation",
+    childAttempt: "scintilashun",
+    childProfile: {
+      childId: "c1",
+      age: 10,
+      grade: "5",
+      spellingLevel: "on-grade",
+    },
+    sessionContext: {
+      mode: "practice",
+      previousAttemptsOnThisWord: 0,
+      previousMissPatterns: [],
+      recentlyPracticedWords: [],
+    },
+  });
+
+  const result = normalizeMissAnalysisErrorTypes(
+    input,
+    makeOutput({
+      missAnalysis: {
+        summary: "The ending was rewritten by sound.",
+        primaryErrorType: "letter_substitution",
+        secondaryErrorTypes: [],
+        errorTypeEvidence: {
+          letter_substitution: "Fallback substitution evidence.",
+        },
+        primaryErrorFocus: "Keep the ending spelling steady.",
+        likelyWrongWordInterpretation: false,
+      },
+    }),
+  );
+
+  assert.equal(result.missAnalysis.primaryErrorType, "ending_confusion");
+  assert.equal(
+    result.missAnalysis.secondaryErrorTypes.includes("phonetic_spelling"),
+    true,
+  );
+  assert.equal(
+    result.missAnalysis.secondaryErrorTypes.includes("double_letter_error"),
+    true,
+  );
+});
+
+test("suppresses extra_letter when an added doubled consonant already explains the same span", () => {
+  const input = buildSpellingCoachInput({
+    targetWord: "stratosphere",
+    childAttempt: "sttratosphere",
+    childProfile: {
+      childId: "c1",
+      age: 10,
+      grade: "5",
+      spellingLevel: "on-grade",
+    },
+    sessionContext: {
+      mode: "practice",
+      previousAttemptsOnThisWord: 0,
+      previousMissPatterns: [],
+      recentlyPracticedWords: [],
+    },
+  });
+
+  const result = normalizeMissAnalysisErrorTypes(
+    input,
+    makeOutput({
+      missAnalysis: {
+        summary: "An extra repeated consonant was added.",
+        primaryErrorType: "letter_substitution",
+        secondaryErrorTypes: [],
+        errorTypeEvidence: {
+          letter_substitution: "Fallback substitution evidence.",
+        },
+        primaryErrorFocus: "Watch the beginning of the word.",
+        likelyWrongWordInterpretation: false,
+      },
+    }),
+  );
+
+  assert.equal(result.missAnalysis.primaryErrorType, "double_letter_error");
+  assert.equal(
+    result.missAnalysis.secondaryErrorTypes.includes("extra_letter"),
+    false,
+  );
+});
+
+test("keeps ending confusion alongside other deterministic signals for fleberghost", () => {
+  const input = buildSpellingCoachInput({
+    targetWord: "flabbergast",
+    childAttempt: "fleberghost",
+    childProfile: {
+      childId: "c1",
+      age: 10,
+      grade: "5",
+      spellingLevel: "on-grade",
+    },
+    sessionContext: {
+      mode: "practice",
+      previousAttemptsOnThisWord: 0,
+      previousMissPatterns: [],
+      recentlyPracticedWords: [],
+    },
+  });
+
+  const result = normalizeMissAnalysisErrorTypes(
+    input,
+    makeOutput({
+      missAnalysis: {
+        summary: "Several changes affect the ending and middle of the word.",
+        primaryErrorType: "letter_substitution",
+        secondaryErrorTypes: [],
+        errorTypeEvidence: {
+          letter_substitution: "Fallback substitution evidence.",
+        },
+        primaryErrorFocus: "Keep the ending and repeated letters steady.",
+        likelyWrongWordInterpretation: false,
+      },
+    }),
+  );
+
+  assert.equal(result.missAnalysis.primaryErrorType, "ending_confusion");
+  assert.equal(
+    result.missAnalysis.secondaryErrorTypes.includes("double_letter_error"),
+    true,
+  );
+  assert.equal(
+    result.missAnalysis.secondaryErrorTypes.includes("vowel_confusion"),
+    true,
+  );
+  assert.equal(
+    result.missAnalysis.secondaryErrorTypes.length,
+    2,
+  );
+});
+
+test("keeps ending confusion with extra and missing letters for fabbergasted", () => {
+  const input = buildSpellingCoachInput({
+    targetWord: "flabbergast",
+    childAttempt: "fabbergasted",
+    childProfile: {
+      childId: "c1",
+      age: 10,
+      grade: "5",
+      spellingLevel: "on-grade",
+    },
+    sessionContext: {
+      mode: "practice",
+      previousAttemptsOnThisWord: 0,
+      previousMissPatterns: [],
+      recentlyPracticedWords: [],
+    },
+  });
+
+  const result = normalizeMissAnalysisErrorTypes(
+    input,
+    makeOutput({
+      missAnalysis: {
+        summary: "The ending was expanded and the beginning lost a letter.",
+        primaryErrorType: "letter_substitution",
+        secondaryErrorTypes: [],
+        errorTypeEvidence: {
+          letter_substitution: "Fallback substitution evidence.",
+        },
+        primaryErrorFocus: "Watch both the ending and the missing letter.",
+        likelyWrongWordInterpretation: false,
+      },
+    }),
+  );
+
+  assert.equal(result.missAnalysis.primaryErrorType, "ending_confusion");
+  assert.equal(
+    result.missAnalysis.secondaryErrorTypes.includes("extra_letter"),
+    true,
+  );
+  assert.equal(
+    result.missAnalysis.secondaryErrorTypes.includes("missing_letter"),
+    true,
+  );
+  assert.equal(result.missAnalysis.secondaryErrorTypes.length, 2);
+});
+
+test("classifies the flabbergast miss table with stable primary and secondary signals", () => {
+  const cases: Array<{
+    attempt: string;
+    primary: string;
+    secondaries: string[];
+  }> = [
+    {
+      attempt: "flabberghast",
+      primary: "extra_letter",
+      secondaries: ["ending_confusion", "pattern_rule_mismatch"],
+    },
+    {
+      attempt: "flabergast",
+      primary: "double_letter_error",
+      secondaries: ["missing_letter"],
+    },
+    {
+      attempt: "flabbergasted",
+      primary: "phonetic_spelling",
+      secondaries: ["ending_confusion", "extra_letter"],
+    },
+    {
+      attempt: "flebbergast",
+      primary: "vowel_confusion",
+      secondaries: [],
+    },
+    {
+      attempt: "phlabbergast",
+      primary: "phonetic_spelling",
+      secondaries: [],
+    },
+    {
+      attempt: "flebergast",
+      primary: "double_letter_error",
+      secondaries: ["vowel_confusion", "missing_letter"],
+    },
+    {
+      attempt: "flebberghost",
+      primary: "ending_confusion",
+      secondaries: ["vowel_confusion"],
+    },
+    {
+      attempt: "fleberghost",
+      primary: "ending_confusion",
+      secondaries: ["double_letter_error", "vowel_confusion"],
+    },
+    {
+      attempt: "fabbergast",
+      primary: "missing_letter",
+      secondaries: [],
+    },
+    {
+      attempt: "fabberghost",
+      primary: "ending_confusion",
+      secondaries: ["vowel_confusion", "missing_letter"],
+    },
+    {
+      attempt: "fabbergasted",
+      primary: "ending_confusion",
+      secondaries: ["extra_letter", "missing_letter"],
+    },
+  ];
+
+  for (const testCase of cases) {
+    const input = buildSpellingCoachInput({
+      targetWord: "flabbergast",
+      childAttempt: testCase.attempt,
+      childProfile: {
+        childId: "c1",
+        age: 10,
+        grade: "5",
+        spellingLevel: "on-grade",
+      },
+      sessionContext: {
+        mode: "practice",
+        previousAttemptsOnThisWord: 0,
+        previousMissPatterns: [],
+        recentlyPracticedWords: [],
+      },
+    });
+
+    const result = normalizeMissAnalysisErrorTypes(
+      input,
+      makeOutput({
+        missAnalysis: {
+          summary: "Fallback summary.",
+          primaryErrorType: "letter_substitution",
+          secondaryErrorTypes: [],
+          errorTypeEvidence: {
+            letter_substitution: "Fallback substitution evidence.",
+          },
+          primaryErrorFocus: "Fallback focus.",
+          likelyWrongWordInterpretation: false,
+        },
+      }),
+    );
+
+    assert.equal(
+      result.missAnalysis.primaryErrorType,
+      testCase.primary,
+      `unexpected primary for ${testCase.attempt}`,
+    );
+
+    for (const secondary of testCase.secondaries) {
+      assert.equal(
+        result.missAnalysis.secondaryErrorTypes.includes(secondary),
+        true,
+        `missing secondary ${secondary} for ${testCase.attempt}`,
+      );
+    }
+
+    assert.equal(
+      result.missAnalysis.secondaryErrorTypes.length,
+      testCase.secondaries.length,
+      `unexpected secondary count for ${testCase.attempt}`,
+    );
+  }
+});
+
+test("promotes high-edit-distance misses to far_from_target", () => {
+  const input = buildSpellingCoachInput({
+    targetWord: "strychnine",
+    childAttempt: "stricma",
+    childProfile: {
+      childId: "c1",
+      age: 10,
+      grade: "5",
+      spellingLevel: "on-grade",
+    },
+    sessionContext: {
+      mode: "practice",
+      previousAttemptsOnThisWord: 0,
+      previousMissPatterns: [],
+      recentlyPracticedWords: [],
+    },
+  });
+
+  assert.equal(input.missSignals.editDistance, 6);
+
+  const result = normalizeMissAnalysisErrorTypes(
+    input,
+    makeOutput({
+      missAnalysis: {
+        summary: "Fallback summary.",
+        primaryErrorType: "letter_substitution",
+        secondaryErrorTypes: [],
+        errorTypeEvidence: {
+          letter_substitution: "Fallback substitution evidence.",
+        },
+        primaryErrorFocus: "Fallback focus.",
+        likelyWrongWordInterpretation: false,
+      },
+    }),
+  );
+
+  assert.equal(result.missAnalysis.primaryErrorType, "far_from_target");
+  assert.equal(
+    result.missAnalysis.errorTypeEvidence.far_from_target,
+    "The spelling changed several parts of the word, so it drifted far from the target word.",
+  );
+});
+
+test("promotes silent-letter misses to silent_letter_error", () => {
+  const input: SpellingCoachInput = {
+    targetWord: "answer",
+    childAttempt: "anser",
+    childProfile: baseProfile,
+    wordMetadata: {
+      definition: "a reply or solution",
+      origin: "Old English",
+      partOfSpeech: "noun",
+      pronunciation: "AN-ser",
+    },
+    missSignals: {
+      isCorrect: false,
+      nearMiss: true,
+      missingLetters: ["w"],
+      extraLetters: [],
+      substitutedLetters: [],
+      transposedLetters: [],
+      repeatedLetterIssue: false,
+      silentLetterFactsTouched: [
+        {
+          text: "w",
+          label: "silent w",
+          reason: "The w is written but not pronounced.",
+        },
+      ],
+      likelyRushed: false,
+      editDistance: 1,
+    },
+    structuralHints: {
+      syllables: ["ans", "wer"],
+      likelyChunks: ["ans", "wer"],
+      detectedPatterns: ["silent w"],
+    },
+    sessionContext: {
+      mode: "practice",
+      previousAttemptsOnThisWord: 0,
+      previousMissPatterns: [],
+      recentlyPracticedWords: [],
+    },
+  };
+
+  const result = normalizeMissAnalysisErrorTypes(
+    input,
+    makeOutput({
+      missAnalysis: {
+        summary: "The spelling leaves out a letter in the middle of the word.",
+        primaryErrorType: "missing_letter",
+        secondaryErrorTypes: [],
+        errorTypeEvidence: {
+          missing_letter: "One written letter is missing from the middle of the word.",
+        },
+        primaryErrorFocus: "Keep the missing letter in the middle of the word.",
+      },
+    }),
+  );
+
+  assert.equal(result.missAnalysis.primaryErrorType, "silent_letter_error");
+  assert.equal(
+    result.missAnalysis.errorTypeEvidence.silent_letter_error,
+    "The w is written but not pronounced.",
+  );
+  assert.equal(
+    "missing_letter" in result.missAnalysis.errorTypeEvidence,
+    true,
+  );
+});
+
+test("promotes sound-based tricky-part misses to phonetic_spelling", () => {
+  const input: SpellingCoachInput = {
+    targetWord: "phlox",
+    childAttempt: "flox",
+    childProfile: baseProfile,
+    wordMetadata: {
+      definition: "a flowering plant with clustered blooms",
+      origin: "Greek",
+      partOfSpeech: "noun",
+      pronunciation: "floks",
+    },
+    missSignals: {
+      isCorrect: false,
+      nearMiss: true,
+      missingLetters: ["ph"],
+      extraLetters: [],
+      substitutedLetters: ["f for ph"],
+      transposedLetters: [],
+      repeatedLetterIssue: false,
+      trickyPartFactsTouched: [
+        {
+          text: "ph",
+          label: "ph says f",
+          reason: "The ph is spelled ph but sounds like f here.",
+          sounds_like: "f",
+          phoneticRewrite: true,
+        },
+      ],
+      likelyRushed: false,
+      editDistance: 1,
+    },
+    structuralHints: {
+      syllables: ["phlox"],
+      likelyChunks: ["ph", "lox"],
+      detectedPatterns: ["ph says f"],
+    },
+    sessionContext: {
+      mode: "practice",
+      previousAttemptsOnThisWord: 0,
+      previousMissPatterns: [],
+      recentlyPracticedWords: [],
+    },
+  };
+
+  const result = normalizeMissAnalysisErrorTypes(
+    input,
+    makeOutput({
+      missAnalysis: {
+        summary: "The spelling simplifies the opening letters.",
+        primaryErrorType: "missing_letter",
+        secondaryErrorTypes: [],
+        errorTypeEvidence: {
+          missing_letter: "Letters from the opening chunk are missing.",
+        },
+        primaryErrorFocus: "Keep the full opening chunk.",
+      },
+    }),
+  );
+
+  assert.equal(result.missAnalysis.primaryErrorType, "phonetic_spelling");
+  assert.equal(
+    result.missAnalysis.errorTypeEvidence.phonetic_spelling,
+    "The ph is spelled ph but sounds like f here.",
+  );
+  assert.equal(
+    result.missAnalysis.secondaryErrorTypes.includes("pattern_rule_mismatch"),
+    true,
+  );
+});
+
+test("promotes tricky spelling-pattern misses to pattern_rule_mismatch", () => {
+  const input: SpellingCoachInput = {
+    targetWord: "made",
+    childAttempt: "mad",
+    childProfile: baseProfile,
+    wordMetadata: {
+      definition: "created or finished",
+      origin: "Old English",
+      partOfSpeech: "verb",
+      pronunciation: "mayd",
+    },
+    missSignals: {
+      isCorrect: false,
+      nearMiss: true,
+      missingLetters: ["e"],
+      extraLetters: [],
+      substitutedLetters: [],
+      transposedLetters: [],
+      repeatedLetterIssue: false,
+      trickyPartFactsTouched: [
+        {
+          text: "e",
+          label: "final e pattern",
+          reason: "The final e helps the a say its name.",
+          sounds_like: undefined,
+          phoneticRewrite: false,
+        },
+      ],
+      likelyRushed: false,
+      editDistance: 1,
+    },
+    structuralHints: {
+      syllables: ["made"],
+      likelyChunks: ["mad", "e"],
+      detectedPatterns: ["silent e"],
+    },
+    sessionContext: {
+      mode: "practice",
+      previousAttemptsOnThisWord: 0,
+      previousMissPatterns: [],
+      recentlyPracticedWords: [],
+    },
+  };
+
+  const result = normalizeMissAnalysisErrorTypes(
+    input,
+    makeOutput({
+      missAnalysis: {
+        summary: "The spelling drops the last letter.",
+        primaryErrorType: "missing_letter",
+        secondaryErrorTypes: [],
+        errorTypeEvidence: {
+          missing_letter: "The last written letter is missing.",
+        },
+        primaryErrorFocus: "Keep the last letter.",
+      },
+    }),
+  );
+
+  assert.equal(result.missAnalysis.primaryErrorType, "missing_letter");
+  assert.equal(
+    result.missAnalysis.errorTypeEvidence.pattern_rule_mismatch,
+    "The final e helps the a say its name.",
+  );
+  assert.equal(
+    result.missAnalysis.secondaryErrorTypes.includes("pattern_rule_mismatch"),
+    true,
+  );
+});
+
+test("keeps likelyWrongWordInterpretation under model control during normalization", () => {
+  const input: SpellingCoachInput = {
+    targetWord: "consternation",
+    childAttempt: "constellation",
+    childProfile: baseProfile,
+    wordMetadata: {
+      definition: "sudden confusion or dismay",
+      origin: "Latin",
+      partOfSpeech: "noun",
+      pronunciation: "kon-ster-NAY-shun",
+    },
+    missSignals: {
+      isCorrect: false,
+      nearMiss: false,
+      missingLetters: ["r", "n"],
+      extraLetters: ["l", "l"],
+      substitutedLetters: ["l for r", "l for n"],
+      transposedLetters: [],
+      repeatedLetterIssue: true,
+      wrongWordInterpretationHints: {
+        targetNormalized: "consternation",
+        attemptNormalized: "constellation",
+        sharedPrefixLength: 6,
+        sharedSuffixLength: 5,
+        longestCommonSubsequenceLength: 10,
+        longestCommonSubsequenceRatio: 0.769,
+        bigramOverlapRatio: 0.636,
+        trigramOverlapRatio: 0.5,
+        substantialStructuralOverlap: true,
+      },
+      deterministicLikelyWrongWordInterpretation: true,
+      likelyRushed: false,
+      editDistance: 4,
+    },
+    structuralHints: {
+      syllables: ["con", "ster", "na", "tion"],
+      likelyChunks: ["con", "ster", "nation"],
+      detectedPatterns: ["tion"],
+    },
+    sessionContext: {
+      mode: "practice",
+      previousAttemptsOnThisWord: 0,
+      previousMissPatterns: [],
+      recentlyPracticedWords: [],
+    },
+  };
+
+  const result = normalizeMissAnalysisErrorTypes(
+    input,
+    makeOutput({
+      missAnalysis: {
+        summary: "The middle of the word changed to a different familiar-looking form.",
+        primaryErrorType: "letter_substitution",
+        secondaryErrorTypes: [],
+        errorTypeEvidence: {
+          letter_substitution:
+            "Several middle letters changed and the attempt now reads like a different familiar-looking word-form.",
+        },
+        primaryErrorFocus: "Keep the middle chunk stern instead of changing it.",
+        likelyWrongWordInterpretation: false,
+      },
+    }),
+  );
+
+  assert.equal(result.missAnalysis.likelyWrongWordInterpretation, false);
+});
+
+test("appends wrong_word_interpretation as an extra secondary when the model flags it", () => {
+  const input: SpellingCoachInput = {
+    targetWord: "consternation",
+    childAttempt: "constellation",
+    childProfile: baseProfile,
+    wordMetadata: {
+      definition: "sudden confusion or dismay",
+      origin: "Latin",
+      partOfSpeech: "noun",
+      pronunciation: "kon-ster-NAY-shun",
+    },
+    missSignals: {
+      isCorrect: false,
+      nearMiss: false,
+      missingLetters: ["r", "n"],
+      extraLetters: ["l", "l"],
+      substitutedLetters: ["l for r", "l for n"],
+      transposedLetters: [],
+      repeatedLetterIssue: true,
+      likelyRushed: false,
+      editDistance: 4,
+    },
+    structuralHints: {
+      syllables: ["con", "ster", "na", "tion"],
+      likelyChunks: ["con", "ster", "nation"],
+      detectedPatterns: ["tion"],
+    },
+    sessionContext: {
+      mode: "practice",
+      previousAttemptsOnThisWord: 0,
+      previousMissPatterns: [],
+      recentlyPracticedWords: [],
+    },
+  };
+
+  const result = normalizeMissAnalysisErrorTypes(
+    input,
+    makeOutput({
+      missAnalysis: {
+        summary: "The middle of the word changed to another familiar-looking form.",
+        primaryErrorType: "chunk_mismatch",
+        secondaryErrorTypes: ["phonetic_spelling", "pattern_rule_mismatch"],
+        errorTypeEvidence: {
+          chunk_mismatch:
+            "The middle chunk changed to a different familiar-looking form.",
+          phonetic_spelling:
+            "Part of the attempt follows a sound-based rewrite.",
+          pattern_rule_mismatch:
+            "The expected spelling pattern in the middle does not match.",
+        },
+        primaryErrorFocus: "Keep the original middle chunk.",
+        likelyWrongWordInterpretation: true,
+      },
+    }),
+  );
+
+  assert.equal(result.missAnalysis.primaryErrorType, "extra_letter");
+  assert.equal(
+    result.missAnalysis.secondaryErrorTypes.includes("wrong_word_interpretation"),
+    true,
+  );
+  assert.equal(
+    result.missAnalysis.errorTypeEvidence.wrong_word_interpretation,
+    "The attempt reads as another real English word.",
+  );
+});
+
+test("treats manufacture -> manufakcher as ending confusion with phonetic rewrite support", () => {
+  const input = buildSpellingCoachInput({
+    targetWord: "manufacture",
+    childAttempt: "manufakcher",
+    childProfile: {
+      childId: "c1",
+      age: 10,
+      grade: "5",
+      spellingLevel: "on-grade",
+    },
+    sessionContext: {
+      mode: "practice",
+      previousAttemptsOnThisWord: 0,
+      previousMissPatterns: [],
+      recentlyPracticedWords: [],
+    },
+  });
+
+  const result = normalizeMissAnalysisErrorTypes(
+    input,
+    makeOutput({
+      missAnalysis: {
+        summary: "The spelling changed letters in the middle and swapped the last two letters.",
+        primaryErrorType: "letter_transposition",
+        secondaryErrorTypes: [],
+        errorTypeEvidence: {
+          letter_transposition:
+            "The ending 'er' is transposed but still present, showing a letter transposition error.",
+        },
+        primaryErrorFocus: "Keep the middle and ending letters in the right order.",
+        likelyWrongWordInterpretation: false,
+      },
+    }),
+  );
+
+  assert.equal(result.missAnalysis.primaryErrorType, "ending_confusion");
+  assert.equal(
+    result.missAnalysis.secondaryErrorTypes.includes("phonetic_spelling"),
+    true,
+  );
+  assert.equal(result.missAnalysis.secondaryErrorTypes.length, 1);
+  assert.equal(result.missAnalysis.likelyWrongWordInterpretation, false);
+});
+
+test("sanitizes miss analysis wording and strips internal diagnostic tokens", async () => {
+  const input: SpellingCoachInput = {
+    targetWord: "materialize",
+    childAttempt: "materialise",
+    childProfile: baseProfile,
+    wordMetadata: {
+      definition: "to make something real or actual",
+      origin: "Latin",
+      partOfSpeech: "verb",
+      pronunciation: "muh-TEER-ee-uh-lize",
+    },
+    missSignals: {
+      isCorrect: false,
+      nearMiss: true,
+      missingLetters: [],
+      extraLetters: [],
+      substitutedLetters: ["s for z"],
+      transposedLetters: [],
+      repeatedLetterIssue: false,
+      likelyRushed: false,
+      editDistance: 1,
+    },
+    structuralHints: {
+      syllables: ["ma", "te", "ri", "al", "ize"],
+      likelyChunks: ["materi", "alize"],
+      detectedPatterns: ["suffix -ize"],
+    },
+    sessionContext: {
+      mode: "practice",
+      previousAttemptsOnThisWord: 0,
+      previousMissPatterns: [],
+      recentlyPracticedWords: [],
+    },
+  };
+
+  const result = await runSpellingCoachAgent(input, {
+    agent: createMockAgent(
+      makeOutput({
+        missAnalysis: {
+          summary:
+            "The child substituted 's' for the correct 'z' in the suffix '-ize'.",
+          primaryErrorType: "letter_substitution",
+          secondaryErrorTypes: [],
+          errorTypeEvidence: {
+            letter_substitution:
+              "rawSignals.substitutedLetters includes 's for z', showing the child substituted the ending letter. repeatedLetterIssue is false.",
+          },
+          primaryErrorFocus:
+            "The child wrote 's' instead of 'z' in the ending '-ize'.",
+        },
+      }),
+    ),
+  });
+
+  assert.equal(
+    result.missAnalysis.summary,
+    "The spelling substituted 's' for the correct 'z' in the suffix '-ize'.",
+  );
+  assert.equal(
+    result.missAnalysis.primaryErrorFocus,
+    "The spelling uses 's' instead of 'z' in the ending '-ize'.",
+  );
+  assert.equal(
+    result.missAnalysis.errorTypeEvidence.letter_substitution.includes(
+      "rawSignals",
+    ),
+    false,
+  );
+  assert.equal(
+    result.missAnalysis.errorTypeEvidence.letter_substitution.includes(
+      "repeatedLetterIssue",
+    ),
+    false,
+  );
+  assert.equal(
+    result.missAnalysis.errorTypeEvidence.letter_substitution.includes(
+      "The child",
+    ),
+    false,
+  );
+});
+
+test("sanitizes coaching full explanation wording to avoid 'the child wrote'", async () => {
+  const input: SpellingCoachInput = {
+    targetWord: "diaphanous",
+    childAttempt: "diaphonous",
+    childProfile: baseProfile,
+    wordMetadata: {
+      definition: "light, delicate, and almost transparent.",
+      origin: "Greek",
+      partOfSpeech: "adjective",
+      pronunciation: "dy-AF-uh-nus",
+    },
+    missSignals: {
+      isCorrect: false,
+      nearMiss: true,
+      missingLetters: ["a"],
+      extraLetters: ["o"],
+      substitutedLetters: ["o for a"],
+      transposedLetters: [],
+      repeatedLetterIssue: false,
+      likelyRushed: false,
+      editDistance: 1,
+    },
+    structuralHints: {
+      syllables: ["di", "aph", "a", "nous"],
+      likelyChunks: ["dia", "phan", "ous"],
+      detectedPatterns: ["ph says f"],
+    },
+    sessionContext: {
+      mode: "practice",
+      previousAttemptsOnThisWord: 0,
+      previousMissPatterns: [],
+      recentlyPracticedWords: [],
+    },
+  };
+
+  const result = await runSpellingCoachAgent(input, {
+    agent: createMockAgent(
+      makeOutput({
+        missAnalysis: {
+          summary: "The spelling changed the middle vowel in the root chunk.",
+          primaryErrorType: "letter_substitution",
+          secondaryErrorTypes: [],
+          errorTypeEvidence: {
+            letter_substitution:
+              "The middle vowel was changed in the root chunk.",
+          },
+          primaryErrorFocus: "Keep the root chunk 'phan' instead of 'phon'.",
+        },
+        coachingText: {
+          fullExplanation:
+            "The tricky part here is the root chunk 'phan' which uses the 'ph' digraph to make the /f/ sound. The child wrote 'phon' instead, which is a common sound but not correct in this word. Remembering the 'ph' pattern and the chunk 'phan' will help you spell 'diaphanous' correctly.",
+        },
+      }),
+    ),
+  });
+
+  assert.equal(
+    result.coachingText.fullExplanation.includes("The child wrote"),
+    false,
+  );
+  assert.equal(
+    result.coachingText.fullExplanation.toLowerCase().includes("child"),
+    false,
+  );
+});
+
+test("sanitizes plain-English raw signals leakage from miss analysis text", async () => {
+  const input: SpellingCoachInput = {
+    targetWord: "filament",
+    childAttempt: "filiment",
+    childProfile: baseProfile,
+    wordMetadata: {
+      definition: "a slender threadlike object or fiber",
+      origin: "Latin",
+      partOfSpeech: "noun",
+      pronunciation: "FIH-luh-ment",
+    },
+    missSignals: {
+      isCorrect: false,
+      nearMiss: true,
+      missingLetters: ["a"],
+      extraLetters: [],
+      substitutedLetters: [],
+      transposedLetters: [],
+      repeatedLetterIssue: false,
+      likelyRushed: true,
+      editDistance: 1,
+    },
+    structuralHints: {
+      syllables: ["fil", "a", "ment"],
+      likelyChunks: ["fil", "iament"],
+      detectedPatterns: [],
+    },
+    sessionContext: {
+      mode: "practice",
+      previousAttemptsOnThisWord: 0,
+      previousMissPatterns: [],
+      recentlyPracticedWords: [],
+    },
+  };
+
+  const result = await runSpellingCoachAgent(input, {
+    agent: createMockAgent(
+      makeOutput({
+        missAnalysis: {
+          summary:
+            "The spelling is missing the letter 'a' after the 'l' in the middle part of the word.",
+          primaryErrorType: "missing_letter",
+          secondaryErrorTypes: ["likely_rushed"],
+          errorTypeEvidence: {
+            missing_letter:
+              "The raw signals show one missing letter 'a' in the middle chunk 'liament' which was spelled as 'liment'.",
+            likely_rushed:
+              "The raw signals indicate the attempt was likely rushed, which often causes small omissions like this.",
+          },
+          primaryErrorFocus:
+            "missing the letter 'a' in the middle chunk 'liament'",
+        },
+      }),
+    ),
+  });
+
+  assert.equal(
+    result.missAnalysis.errorTypeEvidence.missing_letter.includes(
+      "raw signals",
+    ),
+    false,
+  );
+  assert.equal(
+    result.missAnalysis.errorTypeEvidence.likely_rushed.includes(
+      "raw signals",
+    ),
+    false,
+  );
+  assert.equal(
+    result.missAnalysis.errorTypeEvidence.likely_rushed.startsWith("The attempt"),
+    true,
+  );
 });
 
 test("builds spelling rule hints text from the spelling-rules csv", () => {
@@ -2128,7 +4272,12 @@ test("merges cached word teaching with miss-only analysis on submit", async () =
     },
     missAnalysis: {
       summary: "The ending was rewritten phonetically as shun.",
-      errorTypes: ["phonetic substitution", "ending confusion"],
+      primaryErrorType: "phonetic_spelling",
+      secondaryErrorTypes: ["ending_confusion"],
+      errorTypeEvidence: {
+        phonetic_spelling: "The ending was rewritten by sound rather than by standard spelling.",
+        ending_confusion: "The word ending does not match the expected spelling pattern.",
+      },
       primaryErrorFocus: "Use the -sion spelling instead of writing shun by sound.",
       likelyWrongWordInterpretation: false,
       usedMeaningDisambiguationWell: false,
@@ -2178,7 +4327,7 @@ test("merges cached word teaching with miss-only analysis on submit", async () =
 
   assert.equal(
     result.coachingText.sayAloudTip,
-    "Say it slowly: TAWR-shun.\nThe -sion ending sounds like shun.",
+    "Say it slowly: TAWR-shuhn",
   );
   assert.deepEqual(result.nextStep, {
     practiceFocus: "",
@@ -2195,6 +4344,292 @@ test("merges cached word teaching with miss-only analysis on submit", async () =
         originalRuntimeConceptTeaching;
     }
   }
+});
+
+test("sanitizes miss analysis text in the split runtime path", async () => {
+  const submitInput: SpellingCoachInput = {
+    targetWord: "altercation",
+    childAttempt: "altrecation",
+    childProfile: baseProfile,
+    wordMetadata: {
+      definition: "A noisy argument or fight between people.",
+      origin: "Latin",
+      partOfSpeech: "noun",
+      exampleSentence: "The kids had an altercation over the last toy.",
+    },
+    missSignals: {
+      isCorrect: false,
+      nearMiss: true,
+      missingLetters: [],
+      extraLetters: [],
+      substitutedLetters: [],
+      transposedLetters: ["re"],
+      repeatedLetterIssue: false,
+      likelyRushed: true,
+      editDistance: 2,
+    },
+    structuralHints: {
+      syllables: [],
+      likelyChunks: ["alter", "cation"],
+      detectedPatterns: ["tion"],
+      likelySuffix: "ation",
+    },
+    sessionContext: {
+      mode: "practice",
+      previousAttemptsOnThisWord: 0,
+      previousMissPatterns: [],
+      recentlyPracticedWords: [],
+    },
+  };
+
+  const precomputeOutput = await warmWordTeachingPrecompute(submitInput, {
+    runtime: "direct",
+    directModel: createSequenceMockModel([
+      JSON.stringify({
+        wordTeaching: {
+          conceptTeaching: {
+            summary: "",
+            meaningFocus: "",
+            originFocus: "",
+            morphologyFocus: "",
+            originLabels: [],
+            morphologyLabels: [],
+            relatedForms: [],
+          },
+        },
+        conceptLabels: {
+          originLabels: [],
+          patternLabels: [],
+          morphologyLabels: [],
+        },
+      }),
+    ]),
+  });
+
+  const missOnlyOutput = {
+    correctness: {
+      isCorrect: false,
+      reinforceSuccess: false,
+    },
+    missAnalysis: {
+      summary:
+        "The child substituted the order of 'r' and 'e' in the middle part of the word.",
+      primaryErrorType: "letter_substitution",
+      secondaryErrorTypes: ["likely_rushed"],
+      errorTypeEvidence: {
+        letter_substitution:
+          "The child substituted the order of 'r' and 'e' in the middle of the word.",
+        likely_rushed:
+          "The raw signals indicate the attempt was likely rushed, which can cause letter order mistakes.",
+      },
+      primaryErrorFocus:
+        "The child wrote the letters 'r' and 'e' in the wrong order.",
+      likelyWrongWordInterpretation: false,
+      usedMeaningDisambiguationWell: false,
+    },
+    errorRelevance: {
+      mostRelevantToError: "form",
+      confidence: 0.9,
+      reason: "The miss is centered on letter order.",
+    },
+    teachingDecision: {
+      strategy: "pattern",
+      primaryFocus: "Letter order",
+      secondaryFocuses: [],
+      confidence: 0.85,
+      rationale: "The main miss is a letter-order issue.",
+    },
+    coachingText: {
+      shortFeedback: "Watch the order of the middle letters.",
+      fullExplanation: "",
+      memoryTip: "",
+      sayAloudTip: "",
+    },
+    nextStep: {
+      practiceFocus: "",
+      shouldReviewSoon: false,
+      suggestedSimilarWordTypes: [],
+    },
+  };
+
+  const result = await runSplitSpellingCoachAgent(submitInput, {
+    runtime: "direct",
+    directModel: createSequenceMockModel([
+      JSON.stringify({
+        wordTeaching: {
+          conceptTeaching: precomputeOutput.wordTeaching.conceptTeaching,
+        },
+        conceptLabels: precomputeOutput.conceptLabels,
+      }),
+      JSON.stringify(missOnlyOutput),
+    ]),
+  });
+
+  assert.equal(result.missAnalysis.primaryErrorType, "letter_transposition");
+  assert.equal(
+    result.missAnalysis.errorTypeEvidence.likely_rushed.includes("raw signals"),
+    false,
+  );
+  assert.equal(
+    result.missAnalysis.errorTypeEvidence.letter_transposition.includes(
+      "The child",
+    ),
+    false,
+  );
+  assert.equal(
+    result.missAnalysis.primaryErrorFocus.includes("The child"),
+    false,
+  );
+});
+
+test("sanitizes schema-style evidence names and edit-distance phrasing from miss analysis text", async () => {
+  const input: SpellingCoachInput = {
+    targetWord: "background",
+    childAttempt: "bakground",
+    childProfile: baseProfile,
+    wordMetadata: {
+      definition: "the area or scenery behind the main thing",
+      origin: "English",
+      partOfSpeech: "noun",
+      pronunciation: "BAK-ground",
+    },
+    missSignals: {
+      isCorrect: false,
+      nearMiss: true,
+      missingLetters: ["c"],
+      extraLetters: [],
+      substitutedLetters: [],
+      transposedLetters: [],
+      repeatedLetterIssue: false,
+      likelyRushed: true,
+      editDistance: 1,
+    },
+    structuralHints: {
+      syllables: ["back", "ground"],
+      likelyChunks: ["back", "ground"],
+      detectedPatterns: ["consonant cluster ck"],
+    },
+    sessionContext: {
+      mode: "practice",
+      previousAttemptsOnThisWord: 0,
+      previousMissPatterns: [],
+      recentlyPracticedWords: [],
+    },
+  };
+
+  const result = await runSpellingCoachAgent(input, {
+    agent: createMockAgent(
+      makeOutput({
+        missAnalysis: {
+          summary:
+            "The spelling missed the letter 'c' in the first chunk 'back', writing 'bak' instead.",
+          primaryErrorType: "missing_letter",
+          secondaryErrorTypes: ["likely_rushed"],
+          errorTypeEvidence: {
+            missing_letter:
+              "The letter 'c' is missing from the expected chunk 'back', as shown by the missingLetters signal and chunkMismatchFacts.",
+            likely_rushed:
+              "The edit distance is 1 with a missing letter, and the rawSignals indicate likelyRushed is true.",
+          },
+          primaryErrorFocus: "Missing the letter 'c' in the first chunk 'back'",
+        },
+      }),
+    ),
+  });
+
+  assert.equal(
+    result.missAnalysis.errorTypeEvidence.missing_letter.includes(
+      "missingLetters",
+    ),
+    false,
+  );
+  assert.equal(
+    result.missAnalysis.errorTypeEvidence.missing_letter.includes(
+      "chunkMismatchFacts",
+    ),
+    false,
+  );
+  assert.equal(
+    result.missAnalysis.errorTypeEvidence.likely_rushed.includes(
+      "edit distance",
+    ),
+    false,
+  );
+  assert.equal(
+    result.missAnalysis.errorTypeEvidence.likely_rushed.includes(
+      "likelyRushed",
+    ),
+    false,
+  );
+  assert.equal(
+    result.missAnalysis.errorTypeEvidence.likely_rushed.includes("rawSignals"),
+    false,
+  );
+});
+
+test("sanitizes vowel-substitution signal names from miss analysis evidence", async () => {
+  const input: SpellingCoachInput = {
+    targetWord: "serenade",
+    childAttempt: "sarinade",
+    childProfile: baseProfile,
+    wordMetadata: {
+      definition: "a song performed in someone's honor",
+      origin: "Italian",
+      partOfSpeech: "noun",
+      pronunciation: "SEH-ruh-nayd",
+    },
+    missSignals: {
+      isCorrect: false,
+      nearMiss: true,
+      missingLetters: [],
+      extraLetters: [],
+      substitutedLetters: ["a for e"],
+      transposedLetters: [],
+      repeatedLetterIssue: false,
+      likelyRushed: false,
+      editDistance: 1,
+    },
+    structuralHints: {
+      syllables: ["ser", "e", "nade"],
+      likelyChunks: ["ser", "enade"],
+      detectedPatterns: ["final silent e"],
+    },
+    sessionContext: {
+      mode: "practice",
+      previousAttemptsOnThisWord: 0,
+      previousMissPatterns: [],
+      recentlyPracticedWords: [],
+    },
+  };
+
+  const result = await runSpellingCoachAgent(input, {
+    agent: createMockAgent(
+      makeOutput({
+        missAnalysis: {
+          summary:
+            "The spelling used 'a' instead of 'e' in the vowel part of the word.",
+          primaryErrorType: "vowel_confusion",
+          secondaryErrorTypes: [],
+          errorTypeEvidence: {
+            vowel_confusion:
+              "The attempt substituted 'a' for the expected 'e' in the vowel position, as shown by the vowelSubstitutionPairs signal.",
+          },
+          primaryErrorFocus: "Using 'a' instead of 'e' in the vowel part",
+        },
+      }),
+    ),
+  });
+
+  assert.equal(
+    result.missAnalysis.errorTypeEvidence.vowel_confusion.includes(
+      "vowelSubstitutionPairs",
+    ),
+    false,
+  );
+  assert.equal(
+    result.missAnalysis.errorTypeEvidence.vowel_confusion.includes("signal"),
+    false,
+  );
 });
 
 test("clears runtime concept teaching in the full response path when the feature flag is off", async () => {
@@ -2242,7 +4677,14 @@ test("clears runtime concept teaching in the full response path when the feature
       },
       missAnalysis: {
         summary: "The ending was rewritten phonetically as shun.",
-        errorTypes: ["phonetic substitution", "ending confusion"],
+        primaryErrorType: "phonetic_spelling",
+        secondaryErrorTypes: ["ending_confusion"],
+        errorTypeEvidence: {
+          phonetic_spelling:
+            "The ending was rewritten by sound rather than by standard spelling.",
+          ending_confusion:
+            "The word ending does not match the expected spelling pattern.",
+        },
         primaryErrorFocus:
           "Use the -sion spelling instead of writing shun by sound.",
         likelyWrongWordInterpretation: false,
@@ -2557,6 +4999,58 @@ test("builds sound-aware notes for silent letters and long-u silent-e words", ()
   assert.equal(
     buildSoundAwareTipNote("made", ["M", "EY1", "D"]),
     "The final e helps the a say its name.",
+  );
+});
+
+test("derives structured silent letters and tricky parts from phoneme facts", () => {
+  assert.deepEqual(
+    derivePhonemeTeachingFacts("answer", ["AE1", "N", "S", "ER0"]).silentLetters,
+    [
+      {
+        text: "w",
+        label: "silent w",
+        reason: "The w is written but not pronounced.",
+        source: "phoneme-validated",
+      },
+    ],
+  );
+
+  assert.deepEqual(
+    derivePhonemeTeachingFacts("phlox", ["F", "L", "AA1", "K", "S"]).trickyParts,
+    [
+      {
+        text: "ph",
+        label: "ph says f",
+        sounds_like: "f",
+        reason: "The ph is spelled ph but sounds like f here.",
+        source: "derived-rule",
+      },
+    ],
+  );
+
+  assert.equal(
+    derivePhonemeTeachingFacts("requisition", [
+      "R",
+      "EH2",
+      "K",
+      "W",
+      "AH0",
+      "Z",
+      "IH1",
+      "SH",
+      "AH0",
+      "N",
+    ]).trickyParts.some((fact) => fact.label === "tion says shun"),
+    true,
+  );
+
+  assert.equal(
+    derivePhonemeTeachingFacts("tide", ["T", "AY1", "D"]).trickyParts.some(
+      (fact) =>
+        fact.label === "final e pattern" &&
+        fact.reason === "The final e helps the i say its name.",
+    ),
+    true,
   );
 });
 
@@ -2969,6 +5463,46 @@ test("classifies 'what's the word again' as a repeat-word voice support intent",
 
   assert.equal(result.intent, "repeat_word");
   assert.equal(result.displayText, "what's the word again");
+  if (result.intent === "repeat_word") {
+    assert.equal(result.spokenText.includes("Spell this word: about"), true);
+  }
+});
+
+test("classifies 'what's the word' as a repeat-word voice support intent", () => {
+  const result = interpretVoiceUtterance("about", "What's the word?");
+
+  assert.equal(result.intent, "repeat_word");
+  assert.equal(result.displayText, "what's the word");
+  if (result.intent === "repeat_word") {
+    assert.equal(result.spokenText.includes("Spell this word: about"), true);
+  }
+});
+
+test("classifies 'whats the word' as a repeat-word voice support intent", () => {
+  const result = interpretVoiceUtterance("about", "Whats the word?");
+
+  assert.equal(result.intent, "repeat_word");
+  assert.equal(result.displayText, "whats the word");
+  if (result.intent === "repeat_word") {
+    assert.equal(result.spokenText.includes("Spell this word: about"), true);
+  }
+});
+
+test("classifies 'what is the word' as a repeat-word voice support intent", () => {
+  const result = interpretVoiceUtterance("about", "What is the word?");
+
+  assert.equal(result.intent, "repeat_word");
+  assert.equal(result.displayText, "what is the word");
+  if (result.intent === "repeat_word") {
+    assert.equal(result.spokenText.includes("Spell this word: about"), true);
+  }
+});
+
+test("classifies likely transcript variant 'what's the world' as a repeat-word voice support intent", () => {
+  const result = interpretVoiceUtterance("about", "What's the world?");
+
+  assert.equal(result.intent, "repeat_word");
+  assert.equal(result.displayText, "what's the world");
   if (result.intent === "repeat_word") {
     assert.equal(result.spokenText.includes("Spell this word: about"), true);
   }

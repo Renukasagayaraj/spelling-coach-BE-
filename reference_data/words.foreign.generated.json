@@ -9987,6 +9987,8 @@
             "N"
           ],
           "sound_aware_patterns": [],
+          "silent_letters": [],
+          "tricky_parts": [],
           "friendly_chunks": [
             "mahn",
             "SOON"
@@ -10082,6 +10084,8 @@
             "S"
           ],
           "sound_aware_patterns": [],
+          "silent_letters": [],
+          "tricky_parts": [],
           "friendly_chunks": [
             "AL",
             "buh",
@@ -10162,6 +10166,8 @@
             "IY0"
           ],
           "sound_aware_patterns": [],
+          "silent_letters": [],
+          "tricky_parts": [],
           "friendly_chunks": [
             "suh",
             "FAH",
@@ -10246,6 +10252,8 @@
             "AH0"
           ],
           "sound_aware_patterns": [],
+          "silent_letters": [],
+          "tricky_parts": [],
           "friendly_chunks": [
             "al",
             "FAL",
@@ -10325,6 +10333,8 @@
             "K"
           ],
           "sound_aware_patterns": [],
+          "silent_letters": [],
+          "tricky_parts": [],
           "friendly_chunks": [
             "mahsk"
           ],
@@ -10416,6 +10426,8 @@
             "ER0"
           ],
           "sound_aware_patterns": [],
+          "silent_letters": [],
+          "tricky_parts": [],
           "friendly_chunks": [
             "SHU",
             "ger"
@@ -10502,6 +10514,8 @@
             "ER0"
           ],
           "sound_aware_patterns": [],
+          "silent_letters": [],
+          "tricky_parts": [],
           "friendly_chunks": [
             "KAM",
             "fer"
@@ -14604,6 +14618,8 @@
             "L"
           ],
           "sound_aware_patterns": [],
+          "silent_letters": [],
+          "tricky_parts": [],
           "friendly_chunks": [
             "PUHM",
             "per",
@@ -21355,6 +21371,8 @@
             "M"
           ],
           "sound_aware_patterns": [],
+          "silent_letters": [],
+          "tricky_parts": [],
           "friendly_chunks": [
             "puh",
             "GRAHM"
@@ -24273,6 +24291,8 @@
             "N"
           ],
           "sound_aware_patterns": [],
+          "silent_letters": [],
+          "tricky_parts": [],
           "friendly_chunks": [
             "FRANG",
             "kuhn",
@@ -27417,6 +27437,8 @@
             "D"
           ],
           "sound_aware_patterns": [],
+          "silent_letters": [],
+          "tricky_parts": [],
           "friendly_chunks": [
             "MER",
             "mayd"
@@ -39075,6 +39097,8 @@
             "L"
           ],
           "sound_aware_patterns": [],
+          "silent_letters": [],
+          "tricky_parts": [],
           "friendly_chunks": [
             "PE",
             "tuhl"
@@ -39154,6 +39178,8 @@
             "M"
           ],
           "sound_aware_patterns": [],
+          "silent_letters": [],
+          "tricky_parts": [],
           "friendly_chunks": [
             "GI",
             "nguhm"
@@ -42247,6 +42273,8 @@
             "IY0"
           ],
           "sound_aware_patterns": [],
+          "silent_letters": [],
+          "tricky_parts": [],
           "friendly_chunks": [
             "tah",
             "MAH",
@@ -42341,6 +42369,8 @@
             "T"
           ],
           "sound_aware_patterns": [],
+          "silent_letters": [],
+          "tricky_parts": [],
           "friendly_chunks": [
             "CHAW",
             "kluht"
@@ -45372,6 +45402,8 @@
             "L"
           ],
           "sound_aware_patterns": [],
+          "silent_letters": [],
+          "tricky_parts": [],
           "friendly_chunks": [
             "PLAW",
             "zuh",
@@ -45467,6 +45499,8 @@
             "L"
           ],
           "sound_aware_patterns": [],
+          "silent_letters": [],
+          "tricky_parts": [],
           "friendly_chunks": [
             "A",
             "mi",
@@ -45573,6 +45607,8 @@
             "L"
           ],
           "sound_aware_patterns": [],
+          "silent_letters": [],
+          "tricky_parts": [],
           "friendly_chunks": [
             "FAWR",
             "muh",
@@ -45676,6 +45712,8 @@
             "S"
           ],
           "sound_aware_patterns": [],
+          "silent_letters": [],
+          "tricky_parts": [],
           "friendly_chunks": [
             "mag",
             "NA",
@@ -45770,6 +45808,8 @@
             "T"
           ],
           "sound_aware_patterns": [],
+          "silent_letters": [],
+          "tricky_parts": [],
           "friendly_chunks": [
             "ig",
             "ZOO",
@@ -45856,6 +45896,8 @@
             "S"
           ],
           "sound_aware_patterns": [],
+          "silent_letters": [],
+          "tricky_parts": [],
           "friendly_chunks": [
             "AH",
             "muh",
@@ -45960,6 +46002,8 @@
               "label": "silent c (phoneme-validated)"
             }
           ],
+          "silent_letters": [],
+          "tricky_parts": [],
           "friendly_chunks": [
             "DI",
             "suh",
@@ -46070,6 +46114,8 @@
               "label": "soft g (phoneme-validated)"
             }
           ],
+          "silent_letters": [],
+          "tricky_parts": [],
           "friendly_chunks": [
             "ME",
             "suhj"
@@ -46164,6 +46210,8 @@
             "S"
           ],
           "sound_aware_patterns": [],
+          "silent_letters": [],
+          "tricky_parts": [],
           "friendly_chunks": [
             "pri",
             "KOH",
@@ -54650,6 +54698,8 @@
             "T"
           ],
           "sound_aware_patterns": [],
+          "silent_letters": [],
+          "tricky_parts": [],
           "friendly_chunks": [
             "MA",
             "skuht"
@@ -54746,6 +54796,8 @@
             "K"
           ],
           "sound_aware_patterns": [],
+          "silent_letters": [],
+          "tricky_parts": [],
           "friendly_chunks": [
             "boo",
             "TEEK"
@@ -54848,6 +54900,8 @@
               "label": "soft g (phoneme-validated)"
             }
           ],
+          "silent_letters": [],
+          "tricky_parts": [],
           "friendly_chunks": [
             "GAWR",
             "juhs"
@@ -54945,6 +54999,8 @@
             "M"
           ],
           "sound_aware_patterns": [],
+          "silent_letters": [],
+          "tricky_parts": [],
           "friendly_chunks": [
             "NEE",
             "uh",
@@ -55019,6 +55075,8 @@
             "ZH"
           ],
           "sound_aware_patterns": [],
+          "silent_letters": [],
+          "tricky_parts": [],
           "friendly_chunks": [
             "bayzh"
           ],
@@ -55121,6 +55179,8 @@
             "IY0"
           ],
           "sound_aware_patterns": [],
+          "silent_letters": [],
+          "tricky_parts": [],
           "friendly_chunks": [
             "CHA",
             "see"
@@ -60656,6 +60716,8 @@
               "label": "final y says long e (phoneme-validated)"
             }
           ],
+          "silent_letters": [],
+          "tricky_parts": [],
           "friendly_chunks": [
             "e",
             "ruh",
@@ -60753,6 +60815,8 @@
               "label": "final y says long e (phoneme-validated)"
             }
           ],
+          "silent_letters": [],
+          "tricky_parts": [],
           "friendly_chunks": [
             "uh",
             "KA",
@@ -60849,6 +60913,8 @@
             "S"
           ],
           "sound_aware_patterns": [],
+          "silent_letters": [],
+          "tricky_parts": [],
           "friendly_chunks": [
             "thuh",
             "SAW",
@@ -60937,6 +61003,8 @@
               "label": "soft g (phoneme-validated)"
             }
           ],
+          "silent_letters": [],
+          "tricky_parts": [],
           "friendly_chunks": [
             "jer",
             "AY",
@@ -61053,6 +61121,8 @@
               "label": "final y says long e (phoneme-validated)"
             }
           ],
+          "silent_letters": [],
+          "tricky_parts": [],
           "friendly_chunks": [
             "di",
             "MAH",

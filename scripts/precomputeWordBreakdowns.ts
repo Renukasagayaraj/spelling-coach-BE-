@@ -1,3 +1,4 @@
+import "dotenv/config";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { buildWordPrecomputeInput } from "../app/inputBuilder.js";
@@ -42,6 +43,8 @@ const WORD_FILES = [
   { fileName: "words.custom.generated.json", kind: "custom" as const },
   { fileName: "words.foreign.generated.json", kind: "foreign" as const },
 ];
+const SUPPORTED_BUCKETS = ["legacy-opaque"] as const;
+type RefreshBucket = (typeof SUPPORTED_BUCKETS)[number];
 
 function getRequestedFileName(): string | null {
   const fileFlagIndex = process.argv.indexOf("--file");
@@ -61,6 +64,26 @@ function getRequestedFileName(): string | null {
   }
 
   return fileName;
+}
+
+function getRequestedBucket(): RefreshBucket | null {
+  const bucketFlagIndex = process.argv.indexOf("--bucket");
+  if (bucketFlagIndex === -1) {
+    return null;
+  }
+
+  const bucket = process.argv[bucketFlagIndex + 1]?.trim() as RefreshBucket | undefined;
+  if (!bucket) {
+    throw new Error("Expected a bucket name after --bucket.");
+  }
+
+  if (!SUPPORTED_BUCKETS.includes(bucket)) {
+    throw new Error(
+      `Unsupported --bucket target: ${bucket}. Expected one of: ${SUPPORTED_BUCKETS.join(", ")}`,
+    );
+  }
+
+  return bucket;
 }
 
 function extractAssistantPayload(result: unknown): string {
@@ -151,6 +174,52 @@ function toStoredWordBreakdown(
   };
 }
 
+function hasLegacyStructureLabels(word: WordEntry): boolean {
+  const matches = word.word_breakdown?.matched_patterns ?? [];
+  return matches.some(
+    (match) =>
+      match.label === "VCV structure" || match.label === "VCCV structure",
+  );
+}
+
+function isLegacyOpaqueBreakdownCandidate(word: WordEntry): boolean {
+  if (word.level !== "3") {
+    return false;
+  }
+
+  const breakdown = word.word_breakdown;
+  if (!breakdown) {
+    return false;
+  }
+
+  if (!hasLegacyStructureLabels(word)) {
+    return false;
+  }
+
+  if (breakdown.alternate_display_chunks.length > 0) {
+    return false;
+  }
+
+  const longestChunkLength = Math.max(
+    0,
+    ...breakdown.display_chunks.map((chunk) => chunk.length),
+  );
+
+  return breakdown.display_chunks.length <= 2 && longestChunkLength >= 6;
+}
+
+function shouldRefreshWord(
+  word: WordEntry,
+  overwrite: boolean,
+  bucket: RefreshBucket | null,
+): boolean {
+  if (bucket === "legacy-opaque") {
+    return isLegacyOpaqueBreakdownCandidate(word);
+  }
+
+  return overwrite || !word.word_breakdown;
+}
+
 async function precomputeWordBreakdown(word: WordEntry): Promise<WordEntry["word_breakdown"]> {
   const model = await createDirectSpellingCoachModel({
     model: getConfiguredModelName(),
@@ -175,11 +244,12 @@ async function precomputeWordBreakdown(word: WordEntry): Promise<WordEntry["word
 async function enrichCatalogWords(
   words: WordEntry[],
   overwrite: boolean,
+  bucket: RefreshBucket | null,
 ): Promise<WordEntry[]> {
   const enriched: WordEntry[] = [];
 
   for (const word of words) {
-    if (word.word_breakdown && !overwrite) {
+    if (!shouldRefreshWord(word, overwrite, bucket)) {
       enriched.push(word);
       continue;
     }
@@ -198,6 +268,7 @@ async function enrichCatalogWords(
 async function main(): Promise<void> {
   const overwrite = process.argv.includes("--overwrite");
   const requestedFileName = getRequestedFileName();
+  const requestedBucket = getRequestedBucket();
 
   for (const descriptor of WORD_FILES) {
     if (requestedFileName && descriptor.fileName !== requestedFileName) {
@@ -215,7 +286,7 @@ async function main(): Promise<void> {
       for (const list of lists) {
         enrichedLists.push({
           ...list,
-          words: await enrichCatalogWords(list.words, overwrite),
+          words: await enrichCatalogWords(list.words, overwrite, requestedBucket),
         });
       }
 
@@ -230,7 +301,7 @@ async function main(): Promise<void> {
       for (const list of lists) {
         enrichedLists.push({
           ...list,
-          words: await enrichCatalogWords(list.words, overwrite),
+          words: await enrichCatalogWords(list.words, overwrite, requestedBucket),
         });
       }
 
@@ -239,7 +310,11 @@ async function main(): Promise<void> {
     }
 
     const words = parsed as WordEntry[];
-    const enrichedWords = await enrichCatalogWords(words, overwrite);
+    const enrichedWords = await enrichCatalogWords(
+      words,
+      overwrite,
+      requestedBucket,
+    );
     writeFileSync(absolutePath, `${JSON.stringify(enrichedWords, null, 2)}\n`, "utf8");
   }
 }

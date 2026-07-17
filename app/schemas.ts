@@ -27,6 +27,89 @@ export const MissSignalsSchema = z
     substitutedLetters: z.array(z.string()),
     transposedLetters: z.array(z.string()),
     repeatedLetterIssue: z.boolean(),
+    vowelSubstitutionPairs: z
+      .array(
+        z
+          .object({
+            actual: z.string(),
+            expected: z.string(),
+          })
+          .strict(),
+      )
+      .optional(),
+    doubleLetterMismatch: z
+      .object({
+        detected: z.boolean(),
+        missingFromDouble: z.array(z.string()),
+        extraDouble: z.array(z.string()),
+        affectedLetters: z.array(z.string()),
+      })
+      .strict()
+      .optional(),
+    chunkMismatchFacts: z
+      .array(
+        z
+          .object({
+            expectedChunk: z.string(),
+            observedFragment: z.string(),
+            phoneticRewrite: z.boolean(),
+          })
+          .strict(),
+      )
+      .optional(),
+    endingConfusionFacts: z
+      .array(
+        z
+          .object({
+            suffix: z.string(),
+            attemptedEnding: z.string(),
+            phoneticRewrite: z.boolean(),
+          })
+          .strict(),
+      )
+      .optional(),
+    silentLetterFactsTouched: z
+      .array(
+        z
+          .object({
+            text: z.string(),
+            label: z.string(),
+            reason: z.string(),
+            sounds_like: z.string().optional(),
+            source: z.string().optional(),
+          })
+          .strict(),
+      )
+      .optional(),
+    trickyPartFactsTouched: z
+      .array(
+        z
+          .object({
+            text: z.string(),
+            label: z.string(),
+            reason: z.string(),
+            sounds_like: z.string().optional(),
+            phoneticRewrite: z.boolean(),
+            source: z.string().optional(),
+          })
+          .strict(),
+      )
+      .optional(),
+    wrongWordInterpretationHints: z
+      .object({
+        targetNormalized: z.string(),
+        attemptNormalized: z.string(),
+        sharedPrefixLength: z.number().int().nonnegative(),
+        sharedSuffixLength: z.number().int().nonnegative(),
+        longestCommonSubsequenceLength: z.number().int().nonnegative(),
+        longestCommonSubsequenceRatio: z.number().nonnegative(),
+        bigramOverlapRatio: z.number().nonnegative(),
+        trigramOverlapRatio: z.number().nonnegative(),
+        substantialStructuralOverlap: z.boolean(),
+      })
+      .strict()
+      .optional(),
+    deterministicLikelyWrongWordInterpretation: z.boolean().optional(),
     likelyRushed: z.boolean(),
     editDistance: z.number().nonnegative(),
   })
@@ -70,6 +153,27 @@ export const TeachingStrategySchema = z.enum([
   "memory",
   "mixed",
 ]);
+
+export const ERROR_TYPE_VALUES = [
+  "far_from_target",
+  "missing_letter",
+  "extra_letter",
+  "letter_substitution",
+  "letter_transposition",
+  "double_letter_error",
+  "phonetic_spelling",
+  "vowel_confusion",
+  "ending_confusion",
+  "chunk_mismatch",
+  "consonant_cluster_error",
+  "silent_letter_error",
+  "pattern_rule_mismatch",
+  "morphology_error",
+  "likely_rushed",
+  "wrong_word_interpretation",
+] as const;
+
+export const ErrorTypeSchema = z.enum(ERROR_TYPE_VALUES);
 
 export const ErrorRelevanceSchema = z.enum([
   "form",
@@ -130,7 +234,9 @@ export const CorrectnessSchema = z
 export const MissAnalysisSchema = z
   .object({
     summary: z.string(),
-    errorTypes: z.array(z.string()),
+    primaryErrorType: ErrorTypeSchema.nullable(),
+    secondaryErrorTypes: z.array(ErrorTypeSchema),
+    errorTypeEvidence: z.record(z.string(), z.string()),
     primaryErrorFocus: z.string(),
     likelyWrongWordInterpretation: z.boolean(),
     usedMeaningDisambiguationWell: z.boolean(),

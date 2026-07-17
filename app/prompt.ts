@@ -1,10 +1,14 @@
-import type { SpellingCoachInput } from "./schemas.js";
+import { ERROR_TYPE_VALUES, type SpellingCoachInput } from "./schemas.js";
 import {
   buildReferenceHintsText,
   buildSpellingRuleHintsText,
   isSpellingRulePromptHintsEnabled,
 } from "./referenceData.js";
 import { getWordByText } from "./wordCatalog.js";
+import {
+  buildWrongWordInterpretationHints,
+  getDeterministicWrongWordInterpretationFlag,
+} from "./deterministicMissSignals.js";
 
 export function isNextStepEnabled(): boolean {
   return process.env.SPELLING_COACH_NEXT_STEP === "on";
@@ -33,6 +37,148 @@ function getMemoryTipPromptGuidance(targetWord: string): string[] {
   return ["Keep coachingText.memoryTip brief and focused on recall."];
 }
 
+function buildAllowedErrorTypesText(): string {
+  return ERROR_TYPE_VALUES.map((value) => `- ${value}`).join("\n");
+}
+
+function buildPronunciationEvidence(targetWord: string): {
+  childFriendlyPronunciation: string;
+  stressPattern: string[];
+  unstressedChunks: string[];
+  silentLetters: Array<{
+    text: string;
+    label: string;
+    reason: string;
+    soundsLike?: string;
+  }>;
+  trickyParts: Array<{
+    text: string;
+    label: string;
+    reason: string;
+    soundsLike?: string;
+  }>;
+} {
+  const word = getWordByText(targetWord);
+  const chunks = word?.phoneme_metadata?.friendly_chunks ?? [];
+  const childFriendlyPronunciation = chunks.join("-");
+  const stressPattern = chunks.map((chunk) =>
+    /[A-Z]{2,}/.test(chunk) ? "stressed" : "unstressed",
+  );
+  const unstressedChunks = chunks.filter((chunk) => !/[A-Z]{2,}/.test(chunk));
+  const silentLetters =
+    word?.phoneme_metadata?.silent_letters?.map((fact) => ({
+      text: fact.text,
+      label: fact.label,
+      reason: fact.reason,
+      soundsLike: fact.sounds_like,
+    })) ??
+    [
+      ...new Set(
+        (word?.phoneme_metadata?.sound_aware_patterns ?? [])
+          .map((pattern) => pattern.label)
+          .filter((label) => /silent/i.test(label)),
+      ),
+    ].map((label) => ({
+      text: label,
+      label,
+      reason: "",
+    }));
+  const trickyParts =
+    word?.phoneme_metadata?.tricky_parts?.map((fact) => ({
+      text: fact.text,
+      label: fact.label,
+      reason: fact.reason,
+      soundsLike: fact.sounds_like,
+    })) ?? [];
+
+  return {
+    childFriendlyPronunciation,
+    stressPattern,
+    unstressedChunks,
+    silentLetters,
+    trickyParts,
+  };
+}
+
+function buildMissPromptEvidence(
+  input: SpellingCoachInput,
+  wordTeachingPrecompute: string,
+): string {
+  const word = getWordByText(input.targetWord);
+  const parsedPrecompute = JSON.parse(wordTeachingPrecompute) as {
+    wordBreakdown?: {
+      displayChunks?: string[];
+      alternateDisplayChunks?: string[][];
+      matchedPatterns?: Array<{ label?: string; matchedText?: string }>;
+    };
+    wordTeaching?: {
+      conceptTeaching?: {
+        morphologyLabels?: string[];
+      };
+    };
+  };
+  const pronunciationEvidence = buildPronunciationEvidence(input.targetWord);
+  const wrongWordInterpretationHints =
+    input.missSignals.wrongWordInterpretationHints ??
+    buildWrongWordInterpretationHints(input.targetWord, input.childAttempt);
+  const matchedPatterns = parsedPrecompute.wordBreakdown?.matchedPatterns ?? [];
+  const trickyParts = [
+    ...new Set(
+      matchedPatterns
+        .flatMap((pattern) => [pattern.matchedText, pattern.label])
+        .filter((value): value is string => Boolean(value)),
+    ),
+  ];
+  const morphologyLabels =
+    parsedPrecompute.wordTeaching?.conceptTeaching?.morphologyLabels ?? [];
+
+  const morphology = {
+    prefixes: morphologyLabels.filter((label) => label.startsWith("prefix_")),
+    roots: morphologyLabels.filter((label) => label.startsWith("root_")),
+    suffixes: morphologyLabels.filter((label) => label.startsWith("suffix_")),
+  };
+
+  return JSON.stringify(
+    {
+      expectedWord: input.targetWord,
+      childAttempt: input.childAttempt,
+      rawSignals: input.missSignals,
+      spellingChunks:
+        parsedPrecompute.wordBreakdown?.displayChunks ??
+        input.structuralHints.likelyChunks,
+      alternateChunks: parsedPrecompute.wordBreakdown?.alternateDisplayChunks ?? [],
+      childFriendlyPronunciation: pronunciationEvidence.childFriendlyPronunciation,
+      wordBreakdown: parsedPrecompute.wordBreakdown ?? null,
+      trickyParts,
+      rootsPrefixesSuffixes: morphology,
+      stressPattern: pronunciationEvidence.stressPattern,
+      unstressedChunks: pronunciationEvidence.unstressedChunks,
+      silentLetters: pronunciationEvidence.silentLetters,
+      phonemeTrickyParts: pronunciationEvidence.trickyParts,
+      wrongWordInterpretationHints,
+      deterministicLikelyWrongWordInterpretation:
+        input.missSignals.deterministicLikelyWrongWordInterpretation ??
+        getDeterministicWrongWordInterpretationFlag(
+          input.targetWord,
+          input.childAttempt,
+          input.missSignals.editDistance,
+          input.missSignals.transposedLetters,
+        ),
+      detectedPatterns: input.structuralHints.detectedPatterns,
+      wordMetadata: {
+        definition: word?.definition ?? input.wordMetadata?.definition ?? "",
+        origin: word?.origin ?? input.wordMetadata?.origin ?? "",
+        partOfSpeech: word?.part_of_speech ?? input.wordMetadata?.partOfSpeech ?? "",
+        exampleSentence:
+          word?.example_sentence ?? input.wordMetadata?.exampleSentence ?? "",
+      },
+      supportsUsed: input.sessionContext,
+    },
+    null,
+    2,
+  );
+}
+
 export const SPELLING_COACH_OUTPUT_SCHEMA_TEXT = `{
   "correctness": {
     "isCorrect": boolean,
@@ -40,7 +186,11 @@ export const SPELLING_COACH_OUTPUT_SCHEMA_TEXT = `{
   },
   "missAnalysis": {
     "summary": string,
-    "errorTypes": string[],
+    "primaryErrorType": ${ERROR_TYPE_VALUES.map((value) => `"${value}"`).join(" | ")} | null,
+    "secondaryErrorTypes": [${ERROR_TYPE_VALUES.map((value) => `"${value}"`).join(", ")}],
+    "errorTypeEvidence": {
+      "<errorType>": string
+    },
     "primaryErrorFocus": string,
     "likelyWrongWordInterpretation": boolean,
     "usedMeaningDisambiguationWell": boolean
@@ -138,7 +288,11 @@ export const MISS_ONLY_OUTPUT_SCHEMA_TEXT = `{
   },
   "missAnalysis": {
     "summary": string,
-    "errorTypes": string[],
+    "primaryErrorType": ${ERROR_TYPE_VALUES.map((value) => `"${value}"`).join(" | ")} | null,
+    "secondaryErrorTypes": [${ERROR_TYPE_VALUES.map((value) => `"${value}"`).join(", ")}],
+    "errorTypeEvidence": {
+      "<errorType>": string
+    },
     "primaryErrorFocus": string,
     "likelyWrongWordInterpretation": boolean,
     "usedMeaningDisambiguationWell": boolean
@@ -286,6 +440,9 @@ Additional constraints:
 - If the child miss is very minor, acknowledge that it was close.
 - If the child miss suggests rushing, mention slowing down only if it is genuinely useful.
 - Use child-friendly language, but do not sound babyish.
+- In user-facing miss analysis text, prefer neutral wording such as "the spelling", "the attempt", or "the word was spelled as".
+- Do not use phrases like "the child added", "the child wrote", or "the child substituted" in missAnalysis.summary, missAnalysis.primaryErrorFocus, or missAnalysis.errorTypeEvidence.
+- Keep miss analysis readable for both children and adult learners.
 - Avoid over-explaining etymology unless it directly helps spelling.
 - Local Greek/Latin reference hints may be provided with matching morphemes from the app's curated CSV files.
 - Use those local reference hints when they clearly help explain the spelling.
@@ -302,11 +459,17 @@ Additional constraints:
 - In coachingText.fullExplanation, first look for a helpful similar-word, word-family, or comparison cue that genuinely supports the spelling.
 - If a useful similar-word comparison is available, prefer it over repeating conceptTeaching.
 - After similar-word comparisons, use pattern, structure, chunking, or letter-choice cues as the next best explanation support.
+- Set missAnalysis.likelyWrongWordInterpretation to true only when the attempt itself is another real word or real related word-form rather than just a small isolated typo.
+- Use the provided structural overlap hints only as supporting evidence, not as the deciding rule.
+- If the attempt merely sounds similar or contains minor noise but does not read like another real word or real related form, keep missAnalysis.likelyWrongWordInterpretation as false.
 - Keep coachingText.fullExplanation mostly focused on the child's spelling error, correction path, chunking, pattern, structure, letter choice, or similar-word comparison.
 - Do not restate wordTeaching.conceptTeaching.summary in coachingText.fullExplanation.
 - Only mention meaning, origin, or morphology in coachingText.fullExplanation when the miss genuinely cannot be explained well without that concept support.
 - Keep coachingText.memoryTip focused on recall help rather than explanation.
 - Do not repeat meaning, origin, or morphology details in coachingText.memoryTip.
+- Never expose internal schema names, diagnostic field names, raw signal keys, or booleans in user-facing text.
+- Do not mention names such as rawSignals, substitutedLetters, extraLetters, repeatedLetterIssue, likelyChunks, detectedPatterns, true, or false.
+- When citing evidence, convert internal signals into plain English observations about the spelling difference itself.
 
 Exact output schema:
 ${SPELLING_COACH_OUTPUT_SCHEMA_TEXT}
@@ -570,6 +733,17 @@ export function buildMissOnlyPrompt(
     "Use the precomputed word-level teaching as support, then focus on correctness, miss analysis, error relevance, teaching decision, coaching text, and next step.",
     "Follow the schema exactly as already specified in the system instructions.",
     "Use the exact top-level keys and nested field names. Do not rename sections.",
+    "Choose missAnalysis.primaryErrorType and missAnalysis.secondaryErrorTypes only from the allowed controlled error type list below.",
+    "Do not invent new error type labels.",
+    "Base category selection on the provided rawSignals and miss evidence.",
+    "missAnalysis.errorTypeEvidence must justify each chosen category using the rawSignals or explicit miss evidence.",
+    "Only include a secondary error type when it is genuinely supported and instructionally useful. Do not force weak or incidental secondary categories.",
+    "Treat deterministic category signals as source-of-truth guidance for category selection. Do not contradict them in the prose.",
+    "Independently judge missAnalysis.likelyWrongWordInterpretation by asking whether the attempt itself is another real word or a real related word-form.",
+    "Use wrongWordInterpretationHints only as supporting evidence. Do not turn this flag on for nonword attempts that merely share structure with the target.",
+    "If missAnalysis.likelyWrongWordInterpretation is true, say plainly that the attempt drifted into another real word or real word-form, while still keeping the primary and secondary error categories aligned to the deterministic taxonomy.",
+    "When deterministic categories such as vowel_confusion, ending_confusion, letter_transposition, double_letter_error, silent_letter_error, phonetic_spelling, or pattern_rule_mismatch are supported, explain those exact categories rather than flattening them into generic letter substitution language.",
+    "For correct spellings, return primaryErrorType as null, secondaryErrorTypes as an empty array, and errorTypeEvidence as an empty object.",
     "Required top-level keys:",
     [
       "correctness",
@@ -579,7 +753,11 @@ export function buildMissOnlyPrompt(
       "coachingText",
       "nextStep",
     ].join(", "),
+    "Allowed error types:",
+    buildAllowedErrorTypesText(),
     ...getMemoryTipPromptGuidance(input.targetWord),
+    "Deterministic miss evidence JSON:",
+    buildMissPromptEvidence(input, wordTeachingPrecompute),
     "Precomputed word-level teaching JSON:",
     wordTeachingPrecompute,
     "Required output schema:",

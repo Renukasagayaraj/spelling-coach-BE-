@@ -23,11 +23,13 @@ import {
 } from "./supabase.js";
 import {
   buildSpellingCoachInput,
+  buildDetailedWordResponse,
   buildWordPrecomputeInputFromWordEntry,
   buildWordPrecomputeInput,
   buildWordResponse,
   CoachingRequestSchema,
   LevelQuerySchema,
+  WordSearchQuerySchema,
 } from "./inputBuilder.js";
 import { CustomWordImportRequestSchema, importCustomWords } from "./customWordImport.js";
 import {
@@ -53,6 +55,7 @@ import {
   listCustomWordListsForUser,
   listForeignOrigins,
   pickNextWord,
+  searchWords,
 } from "./wordCatalog.js";
 import { logError, logInfo } from "./logging.js";
 import {
@@ -290,6 +293,50 @@ export default async function handler(
         });
       sendJson(response, 200, buildWordResponse(word));
       return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/words/search") {
+      const query = WordSearchQuerySchema.parse({
+        q: url.searchParams.get("q"),
+        mode: url.searchParams.get("mode") ?? undefined,
+        limit: url.searchParams.get("limit") ?? undefined,
+      });
+
+      const results = searchWords(query.q, query.mode, query.limit).map((word) => ({
+        word: word.word,
+        level: word.level,
+        origin: word.origin,
+        partOfSpeech: word.part_of_speech,
+      }));
+
+      sendJson(response, 200, {
+        query: query.q,
+        mode: query.mode,
+        limit: query.limit,
+        count: results.length,
+        results,
+      });
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname.startsWith("/api/words/")) {
+      const parts = url.pathname.split("/");
+      const encodedWord = parts[3];
+      const tail = parts[4];
+
+      if (tail === "pronunciation") {
+        // handled below
+      } else if (encodedWord) {
+        const word = decodeURIComponent(encodedWord);
+        const wordEntry = getWordByText(word);
+        if (!wordEntry) {
+          sendJson(response, 404, { error: `Unknown word: ${word}` });
+          return;
+        }
+
+        sendJson(response, 200, buildDetailedWordResponse(wordEntry));
+        return;
+      }
     }
 
     //  Create/start a Mock Bee session

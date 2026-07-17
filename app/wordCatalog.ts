@@ -18,6 +18,16 @@ const StoredPatternMatchSchema = z
   })
   .strict();
 
+const StoredTeachingFactSchema = z
+  .object({
+    text: z.string(),
+    label: z.string(),
+    reason: z.string(),
+    source: z.enum(["phoneme-validated", "derived-rule"]),
+    sounds_like: z.string().optional(),
+  })
+  .strict();
+
 const StoredWordBreakdownSchema = z
   .object({
     display_chunks: z.array(z.string()),
@@ -32,6 +42,8 @@ const StoredPhonemeMetadataSchema = z
     source: z.literal("g2p-en"),
     phonemes: z.array(z.string()).default([]),
     sound_aware_patterns: z.array(StoredPatternMatchSchema).default([]),
+    silent_letters: z.array(StoredTeachingFactSchema).default([]),
+    tricky_parts: z.array(StoredTeachingFactSchema).default([]),
     friendly_chunks: z.array(z.string()).default([]),
     say_aloud_tip: z.string().optional(),
     pronunciation_confidence: z.enum(["high", "medium", "low"]).optional(),
@@ -103,6 +115,7 @@ export type SupportedLevel = "1" | "2" | "3";
 export type WordLevel = z.infer<typeof WordEntrySchema>["level"];
 export type CustomWordList = z.infer<typeof CustomWordListSchema>;
 export type ForeignOriginWordList = z.infer<typeof ForeignOriginWordListSchema>;
+export type WordSearchMode = "startsWith" | "contains";
 type CustomListRotationState = {
   order: string[];
   nextIndex: number;
@@ -114,6 +127,7 @@ let customWordListsCache: CustomWordList[] | null = null;
 let foreignOriginWordListsCache: ForeignOriginWordList[] | null = null;
 let customListRotationCache = new Map<string, CustomListRotationState>();
 let foreignOriginRotationCache = new Map<string, CustomListRotationState>();
+let knownWordFormsCache: Set<string> | null = null;
 
 const DEFAULT_WORD_CATALOG_FILE = "words.generated.json";
 const CUSTOM_WORD_LISTS_FILE = "words.custom.generated.json";
@@ -532,6 +546,72 @@ export function getWordByText(word: string): WordEntry | undefined {
   return loadWordCatalog().find(
     (entry) => entry.word.toLowerCase() === normalizedWord,
   );
+}
+
+export function searchWords(
+  query: string,
+  mode: WordSearchMode,
+  limit = 20,
+): WordEntry[] {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (normalizedQuery.length < 2) {
+    return [];
+  }
+
+  const normalizedLimit = Math.max(1, Math.min(limit, 25));
+  const matches = loadWordCatalog()
+    .filter((entry) => {
+      const normalizedWord = entry.word.toLowerCase();
+      if (normalizedWord === normalizedQuery) {
+        return true;
+      }
+
+      return mode === "startsWith"
+        ? normalizedWord.startsWith(normalizedQuery)
+        : normalizedWord.includes(normalizedQuery);
+    })
+    .sort((left, right) => {
+      const leftWord = left.word.toLowerCase();
+      const rightWord = right.word.toLowerCase();
+      const leftExact = leftWord === normalizedQuery ? 1 : 0;
+      const rightExact = rightWord === normalizedQuery ? 1 : 0;
+      if (rightExact !== leftExact) {
+        return rightExact - leftExact;
+      }
+
+      const leftStarts = leftWord.startsWith(normalizedQuery) ? 1 : 0;
+      const rightStarts = rightWord.startsWith(normalizedQuery) ? 1 : 0;
+      if (rightStarts !== leftStarts) {
+        return rightStarts - leftStarts;
+      }
+
+      if (leftWord.length !== rightWord.length) {
+        return leftWord.length - rightWord.length;
+      }
+
+      return leftWord.localeCompare(rightWord);
+    });
+
+  return matches.slice(0, normalizedLimit);
+}
+
+export function hasKnownWordForm(word: string): boolean {
+  const normalizedWord = word.trim().toLowerCase();
+  if (!normalizedWord) {
+    return false;
+  }
+
+  if (!knownWordFormsCache) {
+    knownWordFormsCache = new Set<string>();
+    for (const entry of loadWordCatalog()) {
+      knownWordFormsCache.add(entry.word.toLowerCase());
+      for (const relatedForm of entry.word_teaching?.concept_teaching?.related_forms ?? []) {
+        knownWordFormsCache.add(relatedForm.toLowerCase());
+      }
+    }
+  }
+
+  return knownWordFormsCache.has(normalizedWord);
 }
 
 export function pickNextWord(

@@ -6,6 +6,10 @@ import {
 } from "./directModel.js";
 import { normalizeWordTeachingPrecomputeChunkReason } from "./chunkReason.js";
 import { getFriendlyPronunciationCue } from "./friendlyPronunciation.js";
+import {
+  normalizeMissAnalysisErrorTypes,
+  sanitizeMissAnalysis,
+} from "./missAnalysis.js";
 import { applyNewPatternsToPrecompute } from "./newPatternMatcher.js";
 import {
   buildLevelOnePrecomputePrompt,
@@ -458,18 +462,49 @@ export async function runSplitSpellingCoachAgent(
   );
 
   const mergeStart = nowMs();
+  const resultSchemaStart = nowMs();
   const result = parseSpellingCoachOutput({
     ...missOnly,
     ...precomputed,
   });
+  timings.push({
+    stage: "merge_schema_validation",
+    durationMs: nowMs() - resultSchemaStart,
+  });
+
+  const missNormalizationStart = nowMs();
+  normalizeMissAnalysisErrorTypes(validatedInput, result);
+  timings.push({
+    stage: "miss_analysis_normalization",
+    durationMs: nowMs() - missNormalizationStart,
+  });
+
+  const sanitizationStart = nowMs();
+  sanitizeMissAnalysis(result);
+  timings.push({
+    stage: "miss_text_sanitization",
+    durationMs: nowMs() - sanitizationStart,
+  });
+
+  const responseCleanupStart = nowMs();
   clearExplanationForCorrectSpelling(result);
   normalizeNextStepFeature(result);
+  timings.push({
+    stage: "response_cleanup",
+    durationMs: nowMs() - responseCleanupStart,
+  });
+
+  const pronunciationCueStart = nowMs();
   const friendlyPronunciationCue = getFriendlyPronunciationCue(
     validatedInput.targetWord,
   );
   if (friendlyPronunciationCue) {
     result.coachingText.sayAloudTip = friendlyPronunciationCue;
   }
+  timings.push({
+    stage: "pronunciation_cue_override",
+    durationMs: nowMs() - pronunciationCueStart,
+  });
   timings.push({
     stage: "merge_validation",
     durationMs: nowMs() - mergeStart,

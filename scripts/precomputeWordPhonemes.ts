@@ -5,6 +5,7 @@ import {
   buildStoredSayAloudTip,
   deriveFriendlyPronunciationChunks,
 } from "../app/friendlyPronunciation.js";
+import { derivePhonemeTeachingFacts } from "../app/phonemeTeachingFacts.js";
 import { auditFriendlyPronunciation } from "../app/pronunciationConfidence.js";
 import { getSoundAwareMatchedPatterns } from "../app/soundAwarePatterns.js";
 
@@ -32,6 +33,20 @@ type WordEntry = {
     source: "g2p-en";
     phonemes: string[];
     sound_aware_patterns: StoredPatternMatch[];
+    silent_letters?: {
+      text: string;
+      label: string;
+      reason: string;
+      source: "phoneme-validated" | "derived-rule";
+      sounds_like?: string;
+    }[];
+    tricky_parts?: {
+      text: string;
+      label: string;
+      reason: string;
+      source: "phoneme-validated" | "derived-rule";
+      sounds_like?: string;
+    }[];
     friendly_chunks?: string[];
     say_aloud_tip?: string;
     pronunciation_confidence?: "high" | "medium" | "low";
@@ -82,7 +97,9 @@ async function main(): Promise<void> {
       overwrite ||
       !entry.phoneme_metadata?.phonemes?.length ||
       !entry.phoneme_metadata?.say_aloud_tip?.trim() ||
-      !entry.phoneme_metadata?.friendly_chunks?.length,
+      !entry.phoneme_metadata?.friendly_chunks?.length ||
+      entry.phoneme_metadata?.silent_letters === undefined ||
+      entry.phoneme_metadata?.tricky_parts === undefined,
   );
 
   if (targets.length === 0) {
@@ -100,7 +117,9 @@ async function main(): Promise<void> {
       overwrite ||
       !entry.phoneme_metadata?.phonemes?.length ||
       !entry.phoneme_metadata?.say_aloud_tip?.trim() ||
-      !entry.phoneme_metadata?.friendly_chunks?.length;
+      !entry.phoneme_metadata?.friendly_chunks?.length ||
+      entry.phoneme_metadata?.silent_letters === undefined ||
+      entry.phoneme_metadata?.tricky_parts === undefined;
 
     if (!shouldRefresh) {
       return entry;
@@ -108,6 +127,8 @@ async function main(): Promise<void> {
 
     const phonemes = phonemesByWord[entry.word.trim().toLowerCase()] ?? [];
     const friendlyChunks = deriveFriendlyPronunciationChunks(phonemes);
+    const soundAwarePatterns = getSoundAwareMatchedPatterns(entry.word, phonemes);
+    const teachingFacts = derivePhonemeTeachingFacts(entry.word, phonemes);
     const sayAloudTip = buildStoredSayAloudTip(
       entry.word,
       phonemes,
@@ -119,6 +140,8 @@ async function main(): Promise<void> {
         source: "g2p-en",
         phonemes,
         sound_aware_patterns: [],
+        silent_letters: teachingFacts.silentLetters,
+        tricky_parts: teachingFacts.trickyParts,
         friendly_chunks: friendlyChunks,
         say_aloud_tip: sayAloudTip ?? undefined,
       },
@@ -132,7 +155,9 @@ async function main(): Promise<void> {
       phoneme_metadata: {
         source: "g2p-en" as const,
         phonemes,
-        sound_aware_patterns: getSoundAwareMatchedPatterns(entry.word, phonemes),
+        sound_aware_patterns: soundAwarePatterns,
+        silent_letters: teachingFacts.silentLetters,
+        tricky_parts: teachingFacts.trickyParts,
         friendly_chunks: friendlyChunks,
         say_aloud_tip: sayAloudTip ?? undefined,
         pronunciation_confidence: pronunciationConfidence,

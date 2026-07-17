@@ -6,6 +6,10 @@ import {
 } from "./directModel.js";
 import { normalizeSpellingCoachOutputChunkReason } from "./chunkReason.js";
 import { getFriendlyPronunciationCue } from "./friendlyPronunciation.js";
+import {
+  normalizeMissAnalysisErrorTypes,
+  sanitizeMissAnalysis,
+} from "./missAnalysis.js";
 import { applyNewPatternsToOutput } from "./newPatternMatcher.js";
 import {
   buildLevelOneCoachingPrompt,
@@ -215,7 +219,9 @@ function buildLevelOneOutput(
     },
     missAnalysis: {
       summary: "",
-      errorTypes: [],
+      primaryErrorType: null,
+      secondaryErrorTypes: [],
+      errorTypeEvidence: {},
       primaryErrorFocus: "",
       likelyWrongWordInterpretation: false,
       usedMeaningDisambiguationWell: false,
@@ -377,23 +383,60 @@ export async function runSpellingCoachAgent(
     const outputValidationStart = nowMs();
     try {
       const parsedJson = parseStrictJson(payload);
+      const schemaValidationStart = nowMs();
       const parsedOutput = parseSpellingCoachOutput(parsedJson);
       const validatedOutput = applyNewPatternsToOutput(
         validatedInput.targetWord,
         normalizeSpellingCoachOutputChunkReason(parsedOutput),
       );
+      timings.push({
+        stage: `schema_and_pattern_validation_${attempt + 1}`,
+        durationMs: nowMs() - schemaValidationStart,
+      });
+
+      const missNormalizationStart = nowMs();
+      normalizeMissAnalysisErrorTypes(validatedInput, validatedOutput);
+      timings.push({
+        stage: `miss_analysis_normalization_${attempt + 1}`,
+        durationMs: nowMs() - missNormalizationStart,
+      });
+
+      const sanitizationStart = nowMs();
+      sanitizeMissAnalysis(validatedOutput);
+      timings.push({
+        stage: `miss_text_sanitization_${attempt + 1}`,
+        durationMs: nowMs() - sanitizationStart,
+      });
+
+      const conceptTeachingNormalizationStart = nowMs();
       normalizeRuntimeConceptTeachingFeature(
         validatedInput.targetWord,
         validatedOutput,
       );
+      timings.push({
+        stage: `concept_teaching_normalization_${attempt + 1}`,
+        durationMs: nowMs() - conceptTeachingNormalizationStart,
+      });
+
+      const responseCleanupStart = nowMs();
       clearExplanationForCorrectSpelling(validatedOutput);
       normalizeNextStepFeature(validatedOutput);
+      timings.push({
+        stage: `response_cleanup_${attempt + 1}`,
+        durationMs: nowMs() - responseCleanupStart,
+      });
+
+      const pronunciationCueStart = nowMs();
       const friendlyPronunciationCue = getFriendlyPronunciationCue(
         validatedInput.targetWord,
       );
       if (friendlyPronunciationCue) {
         validatedOutput.coachingText.sayAloudTip = friendlyPronunciationCue;
       }
+      timings.push({
+        stage: `pronunciation_cue_override_${attempt + 1}`,
+        durationMs: nowMs() - pronunciationCueStart,
+      });
       timings.push({
         stage: `output_validation_${attempt + 1}`,
         durationMs: nowMs() - outputValidationStart,

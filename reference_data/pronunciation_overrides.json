@@ -101,5 +101,12 @@
     "friendly_chunks": ["kuh", "KEK", "see", "uh"],
     "say_aloud_tip": "Say it slowly: kuh-KEK-see-uh",
     "pronunciation_confidence": "high"
+  },
+  {
+    "word": "arachnophagous",
+    "phonemes": ["AH0", "R", "AEK", "N", "AA1", "F", "AH0", "G", "AH0", "S"],
+    "friendly_chunks": ["uh", "rak", "NOF", "uh", "guhs"],
+    "say_aloud_tip": "Say it slowly: uh-rak-NOF-uh-guhs",
+    "pronunciation_confidence": "medium"
   }
 ]

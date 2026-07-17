@@ -10,6 +10,7 @@ import {
   type SupportedLevel,
   type WordEntry,
 } from "./wordCatalog.js";
+import { buildDeterministicMissSignalFacts } from "./deterministicMissSignals.js";
 
 export const CoachingRequestSchema = z
   .object({
@@ -49,6 +50,14 @@ export const CoachingRequestSchema = z
   });
 
 export type CoachingRequest = z.infer<typeof CoachingRequestSchema>;
+
+export const WordSearchQuerySchema = z
+  .object({
+    q: z.string().trim().min(2),
+    mode: z.enum(["startsWith", "contains"]).default("startsWith"),
+    limit: z.coerce.number().int().min(1).max(25).default(20),
+  })
+  .strict();
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -93,6 +102,134 @@ export function buildWordResponse(word: WordEntry) {
     partOfSpeech: word.part_of_speech,
     pronunciation: "",
     patterns: word.patterns,
+  };
+}
+
+function mapPatternMatch(
+  pattern:
+    | {
+        label: string;
+        matchedText?: string;
+        matchedParts?: string[];
+        alternateMatchedParts?: string[][];
+      }
+    | undefined,
+) {
+  if (!pattern) {
+    return pattern;
+  }
+
+  return {
+    label: pattern.label,
+    ...(pattern.matchedText ? { matchedText: pattern.matchedText } : {}),
+    ...(pattern.matchedParts ? { matchedParts: pattern.matchedParts } : {}),
+    ...(pattern.alternateMatchedParts
+      ? { alternateMatchedParts: pattern.alternateMatchedParts }
+      : {}),
+  };
+}
+
+function mapTeachingFact(
+  fact:
+    | {
+        text: string;
+        label: string;
+        reason: string;
+        source: "phoneme-validated" | "derived-rule";
+        sounds_like?: string;
+      }
+    | undefined,
+) {
+  if (!fact) {
+    return fact;
+  }
+
+  return {
+    text: fact.text,
+    label: fact.label,
+    reason: fact.reason,
+    source: fact.source,
+    ...(fact.sounds_like ? { soundsLike: fact.sounds_like } : {}),
+  };
+}
+
+export function buildDetailedWordResponse(word: WordEntry) {
+  return {
+    word: word.word,
+    level: word.level,
+    gradeBand: word.grade_band,
+    difficulty: word.difficulty,
+    origin: word.origin,
+    definition: word.definition,
+    exampleSentence: word.example_sentence,
+    partOfSpeech: word.part_of_speech,
+    patterns: word.patterns,
+    commonMistakes: word.common_mistakes,
+    coachTip: word.coach_tip,
+    ...(word.word_breakdown
+      ? {
+          wordBreakdown: {
+            displayChunks: word.word_breakdown.display_chunks,
+            alternateDisplayChunks:
+              word.word_breakdown.alternate_display_chunks,
+            chunkReason: word.word_breakdown.chunk_reason,
+            matchedPatterns: word.word_breakdown.matched_patterns.map(
+              (pattern) => mapPatternMatch(pattern)!,
+            ),
+          },
+        }
+      : {}),
+    ...(word.concept_labels
+      ? {
+          conceptLabels: {
+            originLabels: word.concept_labels.origin_labels,
+            patternLabels: word.concept_labels.pattern_labels,
+            morphologyLabels: word.concept_labels.morphology_labels,
+          },
+        }
+      : {}),
+    ...(word.word_teaching
+      ? {
+          wordTeaching: {
+            conceptTeaching: {
+              summary: word.word_teaching.concept_teaching.summary,
+              meaningFocus: word.word_teaching.concept_teaching.meaning_focus,
+              originFocus: word.word_teaching.concept_teaching.origin_focus,
+              morphologyFocus:
+                word.word_teaching.concept_teaching.morphology_focus,
+              originLabels: word.word_teaching.concept_teaching.origin_labels,
+              morphologyLabels:
+                word.word_teaching.concept_teaching.morphology_labels,
+              relatedForms: word.word_teaching.concept_teaching.related_forms,
+            },
+          },
+        }
+      : {}),
+    ...(word.phoneme_metadata
+      ? {
+          phonemeMetadata: {
+            source: word.phoneme_metadata.source,
+            phonemes: word.phoneme_metadata.phonemes,
+            soundAwarePatterns: word.phoneme_metadata.sound_aware_patterns.map(
+              (pattern) => mapPatternMatch(pattern)!,
+            ),
+            silentLetters: word.phoneme_metadata.silent_letters.map(
+              (fact) => mapTeachingFact(fact)!,
+            ),
+            trickyParts: word.phoneme_metadata.tricky_parts.map(
+              (fact) => mapTeachingFact(fact)!,
+            ),
+            friendlyChunks: word.phoneme_metadata.friendly_chunks,
+            sayAloudTip: word.phoneme_metadata.say_aloud_tip ?? "",
+            ...(word.phoneme_metadata.pronunciation_confidence
+              ? {
+                  pronunciationConfidence:
+                    word.phoneme_metadata.pronunciation_confidence,
+                }
+              : {}),
+          },
+        }
+      : {}),
   };
 }
 
@@ -388,6 +525,11 @@ export function buildSpellingCoachInputFromWordEntry(
   const parsedRequest = CoachingRequestSchema.parse(request);
 
   const diff = diffWords(word.word, parsedRequest.childAttempt);
+  const deterministicFacts = buildDeterministicMissSignalFacts(
+    word,
+    parsedRequest.childAttempt,
+    diff,
+  );
   const isCorrect =
     word.word.toLowerCase() === parsedRequest.childAttempt.toLowerCase();
   const storedBreakdown = getStoredWordBreakdown(word.word);
@@ -409,7 +551,17 @@ export function buildSpellingCoachInputFromWordEntry(
       extraLetters: diff.extraLetters,
       substitutedLetters: diff.substitutedLetters,
       transposedLetters: diff.transposedLetters,
-      repeatedLetterIssue: /(.)\1/.test(parsedRequest.childAttempt),
+      repeatedLetterIssue: deterministicFacts.repeatedLetterIssue,
+      vowelSubstitutionPairs: deterministicFacts.vowelSubstitutionPairs,
+      doubleLetterMismatch: deterministicFacts.doubleLetterMismatch,
+      chunkMismatchFacts: deterministicFacts.chunkMismatchFacts,
+      endingConfusionFacts: deterministicFacts.endingConfusionFacts,
+      silentLetterFactsTouched: deterministicFacts.silentLetterFactsTouched,
+      trickyPartFactsTouched: deterministicFacts.trickyPartFactsTouched,
+      wrongWordInterpretationHints:
+        deterministicFacts.wrongWordInterpretationHints,
+      deterministicLikelyWrongWordInterpretation:
+        deterministicFacts.deterministicLikelyWrongWordInterpretation,
       likelyRushed:
         !isCorrect &&
         diff.editDistance <= 2 &&
