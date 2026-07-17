@@ -76,8 +76,43 @@ function getStripe(): Stripe {
   return stripeInstance;
 }
 
+function getFrontendReturnUrl(request: import("node:http").IncomingMessage): string {
+  const fallbackBaseUrl = process.env.APP_BASE_URL || "http://localhost:8080";
+  const referer = request.headers.referer || request.headers.origin || fallbackBaseUrl;
+  return referer.split("?")[0].split("#")[0];
+}
+
 const PORT = Number(process.env.PORT ?? 3000);
 const mockBeeService = new MockBeeService();
+const STANDARD_FREE_WORD_LIMIT = Number(process.env.STANDARD_FREE_WORD_LIMIT ?? 30);
+
+function subscriptionIsActive(subscription: Awaited<ReturnType<typeof getUserSubscriptionFromDB>>): boolean {
+  if (!subscription || !["active", "trialing"].includes(subscription.status ?? "")) return false;
+  if (!subscription.current_period_end) return false;
+  return new Date(subscription.current_period_end).getTime() > Date.now();
+}
+
+async function hasPremiumAccess(authToken: string, userId: string): Promise<boolean> {
+  return subscriptionIsActive(await getUserSubscriptionFromDB(authToken, userId));
+}
+
+async function getStandardWordsUsed(authToken: string, userId: string): Promise<number> {
+  const stats = await getUserStatisticsInDB(authToken, userId);
+  return stats
+    .filter((row) => row.mode === "standard" || row.mode?.startsWith("standard_level_"))
+    .reduce((total, row) => total + (row.total_attempts || 0), 0);
+}
+
+function isStandardMode(mode: string): boolean {
+  return mode === "standard" || mode.startsWith("standard_level_");
+}
+
+function sendUpgradeRequired(response: import("node:http").ServerResponse): void {
+  sendJson(response, 402, {
+    error: "Premium subscription required.",
+    code: "SUBSCRIPTION_REQUIRED",
+  });
+}
 
 function sendJson(response: import("node:http").ServerResponse, statusCode: number, body: unknown) {
   response.writeHead(statusCode, {
@@ -257,12 +292,18 @@ export default async function handler(
       return;
     }
 
+    //  Create/start a Mock Bee session
     if (request.method === "POST" && url.pathname === "/api/mock-bee/sessions") {
       const rawBody = await collectBody(request);
       const requestBody = JSON.parse(rawBody);
 
       const user = await authenticateRequest(request);
       const authHeader = request.headers.authorization || "";
+
+      if (!(await hasPremiumAccess(authHeader, user.id))) {
+        sendUpgradeRequired(response);
+        return;
+      }
 
       let customWordsFallback: DBCustomList["words"] | undefined;
 
@@ -304,6 +345,10 @@ export default async function handler(
 
       const user = await authenticateRequest(request);
       const authHeader = request.headers.authorization || "";
+      if (!(await hasPremiumAccess(authHeader, user.id))) {
+        sendUpgradeRequired(response);
+        return;
+      }
       const session = await mockBeeService.getInternalSession(authHeader, user.id, sessionId);
 
       if (session.ownerUserId && user.id !== session.ownerUserId) {
@@ -345,6 +390,7 @@ export default async function handler(
       }
     }
 
+    // spelling test
     if (
       url.pathname.startsWith("/api/mock-bee/sessions/") &&
       request.method === "POST"
@@ -360,6 +406,10 @@ export default async function handler(
 
       const user = await authenticateRequest(request);
       const authHeader = request.headers.authorization || "";
+      if (!(await hasPremiumAccess(authHeader, user.id))) {
+        sendUpgradeRequired(response);
+        return;
+      }
       const session = await mockBeeService.getInternalSession(authHeader, user.id, sessionId);
 
       if (session.ownerUserId && user.id !== session.ownerUserId) {
@@ -486,6 +536,19 @@ export default async function handler(
         customListName,
       } = JSON.parse(rawBody);
 
+      const premium = await hasPremiumAccess(authHeader, user.id);
+      if (!isStandardMode(mode) && !premium) {
+        sendUpgradeRequired(response);
+        return;
+      }
+      if (isStandardMode(mode) && !premium) {
+        const standardWordsUsed = await getStandardWordsUsed(authHeader, user.id);
+        if (standardWordsUsed >= STANDARD_FREE_WORD_LIMIT) {
+          sendUpgradeRequired(response);
+          return;
+        }
+      }
+
       const result = await startPracticeSessionInDB(
         authHeader,
         user.id,
@@ -525,6 +588,19 @@ export default async function handler(
       if (!mode) {
         sendJson(response, 400, { error: "mode is required" });
         return;
+      }
+
+      const premium = await hasPremiumAccess(authHeader, user.id);
+      if (!isStandardMode(mode) && !premium) {
+        sendUpgradeRequired(response);
+        return;
+      }
+      if (isStandardMode(mode) && !premium) {
+        const standardWordsUsed = await getStandardWordsUsed(authHeader, user.id);
+        if (standardWordsUsed >= STANDARD_FREE_WORD_LIMIT) {
+          sendUpgradeRequired(response);
+          return;
+        }
       }
 
       const attemptId = await recordWordAttemptInDB(
@@ -567,17 +643,6 @@ export default async function handler(
       sendJson(response, 200, { success: true });
       return;
     }
-
-    if (request.method === "GET" && url.pathname === "/api/subscription/status") {
-      const user = await authenticateRequest(request);
-      sendJson(response, 200, {
-        subscribed: true,
-        currentPeriodEnd: Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60, // 30 days from now
-        cancelAtPeriodEnd: false,
-      });
-      return;
-    }
-
 
     if (request.method === "GET" && url.pathname === "/api/foreign-origins") {
       sendJson(response, 200, {
@@ -845,8 +910,7 @@ export default async function handler(
         return;
       }
 
-      const referer = request.headers.referer || request.headers.origin || "http://localhost:5173";
-      const cleanReferer = referer.split("?")[0].split("#")[0];
+      const cleanReferer = getFrontendReturnUrl(request);
       const successUrl = `${cleanReferer}?payment_success=true`;
       const cancelUrl = `${cleanReferer}?payment_cancelled=true`;
 
@@ -902,10 +966,42 @@ export default async function handler(
             const expiryTime = new Date(currentPeriodEnd).getTime();
             // If the subscription is active and has more than 10 minutes left
             if (expiryTime > Date.now() + 10 * 60 * 1000) {
+              let stripePriceId: string | null = cachedSub.stripe_price_id ?? null;
+              let priceAmount: number | null = cachedSub.price_unit_amount ?? null;
+              let priceCurrency: string | null = cachedSub.price_currency ?? null;
+              let billingInterval: string | null = cachedSub.billing_interval ?? null;
+              if (process.env.STRIPE_SECRET_KEY && cachedSub.stripe_subscription_id) {
+                try {
+                  const stripeSubscription = await getStripe().subscriptions.retrieve(
+                    cachedSub.stripe_subscription_id,
+                  );
+                  const price = stripeSubscription.items.data[0]?.price;
+                  stripePriceId = price?.id ?? null;
+                  priceAmount = price?.unit_amount ?? null;
+                  priceCurrency = price?.currency ?? null;
+                  billingInterval = price?.recurring?.interval ?? null;
+                  await updateUserSubscriptionInDB(authHeader, user.id, {
+                    stripeCustomerId: cachedSub.stripe_customer_id,
+                    stripeSubscriptionId: cachedSub.stripe_subscription_id,
+                    status,
+                    currentPeriodEnd,
+                    cancelAtPeriodEnd: cachedSub.cancel_at_period_end || false,
+                    stripePriceId,
+                    priceUnitAmount: priceAmount,
+                    priceCurrency,
+                    billingInterval,
+                  });
+                } catch (err) {
+                  logError("Failed to fetch cached subscription price from Stripe:", err);
+                }
+              }
               sendJson(response, 200, {
                 subscribed: true,
                 currentPeriodEnd: Math.floor(expiryTime / 1000),
                 cancelAtPeriodEnd: cachedSub.cancel_at_period_end || false,
+                priceAmount,
+                priceCurrency,
+                billingInterval,
               });
               return;
             }
@@ -935,6 +1031,10 @@ export default async function handler(
             status: "inactive",
             currentPeriodEnd: null,
             cancelAtPeriodEnd: false,
+            stripePriceId: null,
+            priceUnitAmount: null,
+            priceCurrency: null,
+            billingInterval: null,
           });
         } catch (err) {
           logError("Failed to update subscription in DB:", err);
@@ -956,6 +1056,7 @@ export default async function handler(
         const cancelAtPeriodEnd = sub.cancel_at_period_end || false;
         const stripeSubscriptionId = sub.id;
         const status = sub.status || "active";
+        const price = sub.items?.data?.[0]?.price;
 
         try {
           await updateUserSubscriptionInDB(authHeader, user.id, {
@@ -964,6 +1065,10 @@ export default async function handler(
             status,
             currentPeriodEnd: new Date(periodEnd * 1000).toISOString(),
             cancelAtPeriodEnd,
+            stripePriceId: price?.id ?? null,
+            priceUnitAmount: price?.unit_amount ?? null,
+            priceCurrency: price?.currency ?? null,
+            billingInterval: price?.recurring?.interval ?? null,
           });
         } catch (err) {
           logError("Failed to update subscription in DB:", err);
@@ -973,6 +1078,9 @@ export default async function handler(
           subscribed: true,
           currentPeriodEnd: periodEnd,
           cancelAtPeriodEnd,
+          priceAmount: price?.unit_amount ?? null,
+          priceCurrency: price?.currency ?? null,
+          billingInterval: price?.recurring?.interval ?? null,
         });
       } else {
         try {
@@ -982,6 +1090,10 @@ export default async function handler(
             status: "inactive",
             currentPeriodEnd: null,
             cancelAtPeriodEnd: false,
+            stripePriceId: null,
+            priceUnitAmount: null,
+            priceCurrency: null,
+            billingInterval: null,
           });
         } catch (err) {
           logError("Failed to update subscription in DB:", err);
@@ -1017,8 +1129,7 @@ export default async function handler(
         return;
       }
 
-      const referer = request.headers.referer || request.headers.origin || "http://localhost:5173";
-      const cleanReferer = referer.split("?")[0].split("#")[0];
+      const cleanReferer = getFrontendReturnUrl(request);
 
       const portalSession = await stripe.billingPortal.sessions.create({
         customer: customers.data[0].id,

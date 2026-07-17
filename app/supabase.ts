@@ -717,6 +717,10 @@ export async function updateUserSubscriptionInDB(
     status: string | null;
     currentPeriodEnd: string | null;
     cancelAtPeriodEnd: boolean;
+    stripePriceId: string | null;
+    priceUnitAmount: number | null;
+    priceCurrency: string | null;
+    billingInterval: string | null;
   },
 ) {
   const userClient = getSupabaseUserClient(authToken);
@@ -729,6 +733,10 @@ export async function updateUserSubscriptionInDB(
       status: subData.status,
       current_period_end: subData.currentPeriodEnd,
       cancel_at_period_end: subData.cancelAtPeriodEnd,
+      stripe_price_id: subData.stripePriceId,
+      price_unit_amount: subData.priceUnitAmount,
+      price_currency: subData.priceCurrency,
+      billing_interval: subData.billingInterval,
       updated_at: new Date().toISOString(),
     })
     .select()
