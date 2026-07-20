@@ -47,6 +47,9 @@ jobs:
 
       - name: Run Tests
         run: npm test
+        env:
+          SUPABASE_URL: ${{ secrets.DEV_SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.DEV_SUPABASE_PUBLISHABLE_KEY }}
 
   verify:
     name: Verify Secrets
