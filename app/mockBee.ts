@@ -423,24 +423,80 @@ function hydrateMockBeeSession(row: DBMockBeeSessionRow): MockBeeSession {
 }
 
 export class MockBeeService {
-  constructor(
-    private readonly reviewGenerator: MockBeeReviewGenerator = defaultReviewGenerator,
-  ) { }
+  private readonly store?: MockBeeSessionStore;
+  private readonly reviewGenerator: MockBeeReviewGenerator;
 
+  constructor(reviewGenerator?: MockBeeReviewGenerator);
+  constructor(
+    store: MockBeeSessionStore,
+    reviewGenerator?: MockBeeReviewGenerator,
+  );
+  constructor(
+    storeOrReviewGenerator: MockBeeSessionStore | MockBeeReviewGenerator = defaultReviewGenerator,
+    reviewGenerator: MockBeeReviewGenerator = defaultReviewGenerator,
+  ) {
+    if (typeof storeOrReviewGenerator === "function") {
+      this.reviewGenerator = storeOrReviewGenerator;
+      return;
+    }
+
+    this.store = storeOrReviewGenerator;
+    this.reviewGenerator = reviewGenerator;
+  }
+
+  async createSession(
+    request: MockBeeCreateRequest,
+    options?: {
+      ownerUserId?: string;
+      customWordsFallback?: WordEntry[];
+    },
+  ): Promise<ReturnType<typeof buildSessionView>>;
   async createSession(
     authToken: string,
     userId: string,
     request: MockBeeCreateRequest,
-    options: {
+    options?: {
+      ownerUserId?: string;
+      customWordsFallback?: WordEntry[];
+    },
+  ): Promise<
+    | ReturnType<typeof buildSessionView>
+    | {
+      action: "active_session_conflict";
+      activeSessionId: string;
+      activeMode: string;
+    }
+    | {
+      action: "created" | "resume_existing";
+      sessionId: string;
+      session: ReturnType<typeof buildSessionView>;
+    }
+  >;
+  async createSession(
+    authTokenOrRequest: string | MockBeeCreateRequest,
+    userIdOrOptions?: string | {
+      ownerUserId?: string;
+      customWordsFallback?: WordEntry[];
+    },
+    requestArg?: MockBeeCreateRequest,
+    optionsArg: {
       ownerUserId?: string;
       customWordsFallback?: WordEntry[];
     } = {},
   ) {
+    const isInMemory = typeof authTokenOrRequest !== "string";
+    const authToken = isInMemory ? undefined : authTokenOrRequest;
+    const userId = isInMemory ? undefined : userIdOrOptions as string;
+    const request = isInMemory ? authTokenOrRequest : requestArg!;
+    const options = (isInMemory ? userIdOrOptions : optionsArg) as {
+      ownerUserId?: string;
+      customWordsFallback?: WordEntry[];
+    } | undefined;
     const parsed = MockBeeCreateRequestSchema.parse(request);
     const words = await pickWordsForSession(
       parsed,
-      options.ownerUserId,
-      options.customWordsFallback,
+      options?.ownerUserId,
+      options?.customWordsFallback,
     );
 
     const now = new Date().toISOString();
@@ -448,7 +504,7 @@ export class MockBeeService {
       id: randomUUID(),
       createdAt: now,
       updatedAt: now,
-      ownerUserId: options.ownerUserId ?? userId,
+      ownerUserId: options?.ownerUserId ?? userId,
       config: {
         level: parsed.level,
         wordSource: parsed.wordSource,
@@ -466,9 +522,17 @@ export class MockBeeService {
       status: "active",
     };
 
+    if (isInMemory) {
+      if (!this.store) {
+        throw new Error("An in-memory MockBeeSessionStore is required for this call.");
+      }
+      await this.store.create(session);
+      return buildSessionView(session);
+    }
+
     const startResult = await startMockBeeSessionInDB(
-      authToken,
-      userId,
+      authToken!,
+      userId!,
       buildMockBeeSessionConfig(session),
       buildMockBeeSessionState(session),
       parsed.forceCloseCurrent,
@@ -479,8 +543,8 @@ export class MockBeeService {
     }
 
     const row = await getMockBeeSessionFromDB(
-      authToken,
-      userId,
+      authToken!,
+      userId!,
       startResult.sessionId,
     );
 
@@ -500,7 +564,7 @@ export class MockBeeService {
     userId: string,
     sessionId: string,
   ) {
-    const row = await getMockBeeSessionFromDB(authToken, userId, sessionId);
+    const row = await getMockBeeSessionFromDB(authToken, userId!, sessionId);
     if (!row) {
       throw new Error(`Unknown mock bee session: ${sessionId}`);
     }
@@ -508,12 +572,15 @@ export class MockBeeService {
     return buildSessionView(hydrateMockBeeSession(row));
   }
 
-  async getReview(
-    authToken: string,
-    userId: string,
-    sessionId: string,
-  ) {
-    const row = await getMockBeeSessionFromDB(authToken, userId, sessionId);
+  async getReview(sessionId: string): Promise<ReturnType<typeof buildReviewView>>;
+  async getReview(authToken: string, userId: string, sessionId: string): Promise<ReturnType<typeof buildReviewView>>;
+  async getReview(authTokenOrSessionId: string, userId?: string, sessionId?: string) {
+    if (sessionId === undefined) {
+      return buildReviewView(await this.requireInMemorySession(authTokenOrSessionId));
+    }
+
+    const authToken = authTokenOrSessionId;
+    const row = await getMockBeeSessionFromDB(authToken, userId!, sessionId);
     if (!row) {
       throw new Error(`Unknown mock bee session: ${sessionId}`);
     }
@@ -521,12 +588,15 @@ export class MockBeeService {
     return buildReviewView(hydrateMockBeeSession(row));
   }
 
-  async getInternalSession(
-    authToken: string,
-    userId: string,
-    sessionId: string,
-  ) {
-    const row = await getMockBeeSessionFromDB(authToken, userId, sessionId);
+  async getInternalSession(sessionId: string): Promise<MockBeeSession>;
+  async getInternalSession(authToken: string, userId: string, sessionId: string): Promise<MockBeeSession>;
+  async getInternalSession(authTokenOrSessionId: string, userId?: string, sessionId?: string) {
+    if (sessionId === undefined) {
+      return this.requireInMemorySession(authTokenOrSessionId);
+    }
+
+    const authToken = authTokenOrSessionId;
+    const row = await getMockBeeSessionFromDB(authToken, userId!, sessionId!);
     if (!row) {
       throw new Error(`Unknown mock bee session: ${sessionId}`);
     }
@@ -535,13 +605,47 @@ export class MockBeeService {
   }
 
   async submitAttempt(
+    sessionId: string,
+    request: MockBeeSubmitRequest,
+  ): Promise<{ session: ReturnType<typeof buildSessionView>; result: ReturnType<typeof buildResultPayload> }>;
+  async submitAttempt(
     authToken: string,
     userId: string,
     sessionId: string,
     request: MockBeeSubmitRequest,
+  ): Promise<{ session: ReturnType<typeof buildSessionView>; result: ReturnType<typeof buildResultPayload> }>;
+  async submitAttempt(
+    authTokenOrSessionId: string,
+    userIdOrRequest: string | MockBeeSubmitRequest,
+    sessionId?: string,
+    requestArg?: MockBeeSubmitRequest,
   ) {
+    if (requestArg === undefined) {
+      const session = await this.requireActiveInMemorySession(authTokenOrSessionId);
+      const parsed = MockBeeSubmitRequestSchema.parse(userIdOrRequest);
+      const turn = session.turns[session.currentTurnIndex];
+
+      turn.childAttempt = parsed.childAttempt;
+      turn.supportsUsed = parsed.supportsUsed;
+      turn.isCorrect = isExactMatch(turn.word.word, parsed.childAttempt);
+      turn.status = "submitted";
+      turn.answeredAt = new Date().toISOString();
+      session.updatedAt = turn.answeredAt;
+      this.advanceSession(session);
+      this.startInMemoryReviewGeneration(session, turn);
+      await this.store!.save(session);
+
+      return {
+        session: buildSessionView(session),
+        result: buildResultPayload(session, turn, false),
+      };
+    }
+
+    const authToken = authTokenOrSessionId;
+    const userId = userIdOrRequest as string;
+    const request = requestArg;
     const parsed = MockBeeSubmitRequestSchema.parse(request);
-    const row = await getMockBeeSessionFromDB(authToken, userId, sessionId);
+    const row = await getMockBeeSessionFromDB(authToken, userId, sessionId!);
     if (!row) {
       throw new Error(`Unknown mock bee session: ${sessionId}`);
     }
@@ -562,7 +666,7 @@ export class MockBeeService {
     await recordWordAttemptInDB(
       authToken,
       userId,
-      sessionId,
+      sessionId!,
       turn.word.word,
       parsed.childAttempt,
       Boolean(turn.isCorrect),
@@ -581,7 +685,7 @@ export class MockBeeService {
     const isSessionCompleted = session.turns.every((entry) => entry.status !== "pending");
 
     const endedAt = isSessionCompleted ? new Date().toISOString() : null;
-    const updatedRow = await updateMockBeeSessionInDB(authToken, userId, sessionId, {
+    const updatedRow = await updateMockBeeSessionInDB(authToken, userId, sessionId!, {
       session_state: buildMockBeeSessionState(session),
       status: isSessionCompleted ? "completed" : "active",
       total_words_attempted: buildProgress(session).answeredCount,
@@ -601,11 +705,35 @@ export class MockBeeService {
   }
 
   async timeoutCurrentWord(
+    sessionId: string,
+  ): Promise<{ session: ReturnType<typeof buildSessionView>; result: ReturnType<typeof buildResultPayload> }>;
+  async timeoutCurrentWord(
     authToken: string,
     userId: string,
     sessionId: string,
-  ) {
-    const row = await getMockBeeSessionFromDB(authToken, userId, sessionId);
+  ): Promise<{ session: ReturnType<typeof buildSessionView>; result: ReturnType<typeof buildResultPayload> }>;
+  async timeoutCurrentWord(authTokenOrSessionId: string, userId?: string, sessionId?: string) {
+    if (sessionId === undefined) {
+      const session = await this.requireActiveInMemorySession(authTokenOrSessionId);
+      const turn = session.turns[session.currentTurnIndex];
+
+      turn.childAttempt = "";
+      turn.isCorrect = false;
+      turn.status = "timed_out";
+      turn.answeredAt = new Date().toISOString();
+      session.updatedAt = turn.answeredAt;
+      this.advanceSession(session);
+      this.startInMemoryReviewGeneration(session, turn);
+      await this.store!.save(session);
+
+      return {
+        session: buildSessionView(session),
+        result: buildResultPayload(session, turn, true),
+      };
+    }
+
+    const authToken = authTokenOrSessionId;
+    const row = await getMockBeeSessionFromDB(authToken, userId!, sessionId);
     if (!row) {
       throw new Error(`Unknown mock bee session: ${sessionId}`);
     }
@@ -624,7 +752,7 @@ export class MockBeeService {
     session.updatedAt = turn.answeredAt;
     await recordWordAttemptInDB(
       authToken,
-      userId,
+      userId!,
       sessionId,
       turn.word.word,
       "",
@@ -639,12 +767,12 @@ export class MockBeeService {
       false,
     );
     this.advanceSession(session);
-    this.startReviewGeneration(authToken, userId, session, turn);
+    this.startReviewGeneration(authToken, userId!, session, turn);
 
     const isSessionCompleted = session.turns.every((entry) => entry.status !== "pending");
 
     const endedAt = isSessionCompleted ? new Date().toISOString() : null;
-    const updatedRow = await updateMockBeeSessionInDB(authToken, userId, sessionId, {
+    const updatedRow = await updateMockBeeSessionInDB(authToken, userId!, sessionId, {
       session_state: buildMockBeeSessionState(session),
       status: isSessionCompleted ? "completed" : "active",
       total_words_attempted: buildProgress(session).answeredCount,
@@ -702,6 +830,53 @@ export class MockBeeService {
     }
 
     session.currentTurnIndex += 1;
+  }
+
+  private async requireInMemorySession(sessionId: string): Promise<MockBeeSession> {
+    if (!this.store) {
+      throw new Error("An in-memory MockBeeSessionStore is required for this call.");
+    }
+
+    const session = await this.store.get(sessionId);
+    if (!session) {
+      throw new Error(`Unknown mock bee session: ${sessionId}`);
+    }
+
+    return session;
+  }
+
+  private async requireActiveInMemorySession(sessionId: string): Promise<MockBeeSession> {
+    const session = await this.requireInMemorySession(sessionId);
+    if (session.status !== "active") {
+      throw new Error(`Mock bee session ${sessionId} is already completed.`);
+    }
+    return session;
+  }
+
+  private startInMemoryReviewGeneration(
+    session: MockBeeSession,
+    turn: MockBeeTurn,
+  ): void {
+    if (turn.reviewCardStatus === "pending" || turn.reviewCardStatus === "completed") {
+      return;
+    }
+
+    turn.reviewCardStatus = "pending";
+
+    void this.reviewGenerator(turn.word, session, turn)
+      .then(async (reviewCard) => {
+        turn.reviewCard = reviewCard;
+        turn.reviewCardStatus = "completed";
+        turn.reviewError = undefined;
+        session.updatedAt = new Date().toISOString();
+        await this.store!.save(session);
+      })
+      .catch(async (error) => {
+        turn.reviewCardStatus = "failed";
+        turn.reviewError = error instanceof Error ? error.message : String(error);
+        session.updatedAt = new Date().toISOString();
+        await this.store!.save(session);
+      });
   }
 
   private startReviewGeneration(
