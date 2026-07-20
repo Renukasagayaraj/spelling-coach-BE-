@@ -111,6 +111,28 @@ type MockBeeReviewGenerator = (
   turn: MockBeeTurn,
 ) => Promise<SpellingCoachOutput>;
 
+export interface MockBeeSessionStore {
+  create(session: MockBeeSession): Promise<void> | void;
+  get(id: string): Promise<MockBeeSession | undefined> | MockBeeSession | undefined;
+  save(session: MockBeeSession): Promise<void> | void;
+}
+
+export class InMemoryMockBeeSessionStore implements MockBeeSessionStore {
+  private readonly sessions = new Map<string, MockBeeSession>();
+
+  create(session: MockBeeSession): void {
+    this.sessions.set(session.id, session);
+  }
+
+  get(id: string): MockBeeSession | undefined {
+    return this.sessions.get(id);
+  }
+
+  save(session: MockBeeSession): void {
+    this.sessions.set(session.id, session);
+  }
+}
+
 function buildLevelRules(level: SupportedLevel) {
   if (level === "1") {
     return {
@@ -403,7 +425,7 @@ function hydrateMockBeeSession(row: DBMockBeeSessionRow): MockBeeSession {
 export class MockBeeService {
   constructor(
     private readonly reviewGenerator: MockBeeReviewGenerator = defaultReviewGenerator,
-  ) {}
+  ) { }
 
   async createSession(
     authToken: string,

@@ -89,9 +89,19 @@ const PORT = Number(process.env.PORT ?? 3000);
 const mockBeeService = new MockBeeService();
 const STANDARD_FREE_WORD_LIMIT = Number(process.env.STANDARD_FREE_WORD_LIMIT ?? 30);
 
-function subscriptionIsActive(subscription: Awaited<ReturnType<typeof getUserSubscriptionFromDB>>): boolean {
-  if (!subscription || !["active", "trialing"].includes(subscription.status ?? "")) return false;
+function isPremiumSubscriptionStatus(status?: string | null): boolean {
+  return status === "active" || status === "trialing";
+}
+
+function subscriptionIsActive(
+  subscription: Awaited<ReturnType<typeof getUserSubscriptionFromDB>>,
+): boolean {
+  if (!subscription || !isPremiumSubscriptionStatus(subscription.status)) {
+    return false;
+  }
+
   if (!subscription.current_period_end) return false;
+
   return new Date(subscription.current_period_end).getTime() > Date.now();
 }
 
@@ -1089,16 +1099,18 @@ export default async function handler(
         sendJson(response, 200, { subscribed: false });
         return;
       }
-
       const stripeCustomerId = customers.data[0].id;
       const subscriptions = await stripe.subscriptions.list({
         customer: stripeCustomerId,
-        status: "active",
-        limit: 1,
+        status: "all",
+        limit: 10,
       });
 
-      if (subscriptions.data.length > 0) {
-        const sub = subscriptions.data[0] as any;
+      const sub = subscriptions.data.find((item) =>
+        isPremiumSubscriptionStatus(item.status),
+      ) as any;
+
+      if (sub) {
         const periodEnd = sub.current_period_end || sub.items?.data?.[0]?.current_period_end || sub.billing_cycle_anchor;
         const cancelAtPeriodEnd = sub.cancel_at_period_end || false;
         const stripeSubscriptionId = sub.id;
