@@ -79,7 +79,6 @@ type PracticeScope = {
   modeKey: string;
   originLanguage: string | null;
   customListId: string | null;
-  customListName: string | null;
 };
 
 function normalizeOptionalText(value?: string | null): string | null {
@@ -109,7 +108,6 @@ function resolvePracticeScope(
   options?: {
     originLanguage?: string | null;
     customListId?: string | null;
-    customListName?: string | null;
   },
 ): PracticeScope {
   const dbMode = normalizeMode(mode, level);
@@ -134,7 +132,6 @@ function resolvePracticeScope(
     }),
     originLanguage,
     customListId,
-    customListName: normalizeOptionalText(options?.customListName),
   };
 }
 
@@ -149,15 +146,6 @@ function buildModeKeyFromSessionRow(session: {
     customListId: session.custom_list_id,
   });
 }
-
-function getStatisticsLevel(dbMode: string): number | null {
-  if (dbMode.startsWith("standard_level_")) {
-    return Number(dbMode.replace("standard_level_", ""));
-  }
-
-  return null;
-}
-
 
 export interface DBCustomList {
   id: string;
@@ -175,7 +163,7 @@ export async function fetchCustomListsFromDB(authToken: string, userId: string) 
   const userClient = getSupabaseUserClient(authToken);
   const { data, error } = await userClient
     .from("custom_word_lists")
-    .select("id, name, words")
+    .select("id, name, word_count")
     .eq("owner_user_id", userId);
 
   if (error) {
@@ -185,7 +173,7 @@ export async function fetchCustomListsFromDB(authToken: string, userId: string) 
   return (data || []).map((list: any) => ({
     id: list.id as string,
     name: list.name as string,
-    wordCount: Array.isArray(list.words) ? list.words.length : 0,
+    wordCount: Number(list.word_count) || 0,
   }));
 }
 
@@ -323,18 +311,18 @@ export async function updateUserProfileInDB(
  */
 export type StartPracticeSessionResult =
   | {
-      action: "created";
-      sessionId: string;
-    }
+    action: "created";
+    sessionId: string;
+  }
   | {
-      action: "resume_existing";
-      sessionId: string;
-    }
+    action: "resume_existing";
+    sessionId: string;
+  }
   | {
-      action: "active_session_conflict";
-      activeSessionId: string;
-      activeMode: string;
-    };
+    action: "active_session_conflict";
+    activeSessionId: string;
+    activeMode: string;
+  };
 
 export type PracticeSessionStatus = "active" | "completed" | "abandoned";
 
@@ -392,7 +380,6 @@ export async function startPracticeSessionInDB(
   options?: {
     originLanguage?: string | null;
     customListId?: string | null;
-    customListName?: string | null;
   },
 ): Promise<StartPracticeSessionResult> {
   const userClient = getSupabaseUserClient(authToken);
@@ -446,7 +433,6 @@ export async function startPracticeSessionInDB(
       status: "active",
       origin_language: scope.originLanguage,
       custom_list_id: scope.customListId,
-      custom_list_name: scope.customListName,
       session_started_at: new Date().toISOString(),
     })
     .select("id")
@@ -481,7 +467,6 @@ export async function recordWordAttemptInDB(
 ) {
   const userClient = getSupabaseUserClient(authToken);
   const scope = resolvePracticeScope(mode, level);
-  const statsLevel = getStatisticsLevel(scope.dbMode);
   const { data, error } = await userClient
     .from("word_attempts")
     .insert({
@@ -525,18 +510,12 @@ export async function recordWordAttemptInDB(
       .eq("id", sessionId);
   }
 
-  // Fetch current user_statistics for the specific normalized mode (level is null for enum modes)
+  // Fetch current user_statistics for the normalized practice scope.
   let query = userClient
     .from("user_statistics")
     .select("current_streak, best_streak, total_attempts, correct_attempts")
     .eq("user_id", userId)
     .eq("mode", scope.dbMode);
-
-  if (statsLevel == null) {
-    query = query.is("level", null);
-  } else {
-    query = query.eq("level", statsLevel);
-  }
 
   if (scope.originLanguage) {
     query = query.eq("origin_language", scope.originLanguage);
@@ -575,7 +554,6 @@ export async function recordWordAttemptInDB(
     .upsert({
       user_id: userId,
       mode: scope.dbMode,
-      level: statsLevel,
       origin_language: scope.originLanguage,
       custom_list_id: scope.customListId,
       total_attempts: nextAttempts,
@@ -585,7 +563,7 @@ export async function recordWordAttemptInDB(
       badges: badges,
       updated_at: new Date().toISOString(),
     }, {
-      onConflict: "user_id,mode,level,origin_language,custom_list_id"
+      onConflict: "user_id,mode,origin_language,custom_list_id"
     });
 
   if (statsError) {
@@ -635,7 +613,7 @@ export async function getUserStatisticsInDB(
   const userClient = getSupabaseUserClient(authToken);
   const { data, error } = await userClient
     .from("user_statistics")
-    .select("level, mode, origin_language, custom_list_id, current_streak, best_streak, total_attempts, correct_attempts, badges")
+    .select("mode, origin_language, custom_list_id, current_streak, best_streak, total_attempts, correct_attempts, badges")
     .eq("user_id", userId);
 
   if (error) {
@@ -674,7 +652,7 @@ export async function getPracticeSessionFromDB(
   const userClient = getSupabaseUserClient(authToken);
   const { data, error } = await userClient
     .from("practice_sessions")
-    .select("id, mode, status, session_started_at, session_ended_at, origin_language, custom_list_id, custom_list_name")
+    .select("id, mode, status, session_started_at, session_ended_at, origin_language, custom_list_id")
     .eq("id", sessionId)
     .eq("user_id", userId)
     .maybeSingle();

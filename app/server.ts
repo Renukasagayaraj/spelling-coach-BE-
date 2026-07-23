@@ -590,7 +590,6 @@ export default async function handler(
         forceCloseCurrent,
         originLanguage,
         customListId,
-        customListName,
       } = JSON.parse(rawBody);
 
       const premium = await hasPremiumAccess(authHeader, user.id);
@@ -615,7 +614,6 @@ export default async function handler(
         {
           originLanguage,
           customListId,
-          customListName,
         },
       );
       sendJson(response, 200, result);
