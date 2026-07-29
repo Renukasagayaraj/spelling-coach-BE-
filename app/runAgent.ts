@@ -37,6 +37,8 @@ export type RunSpellingCoachAgentOptions = {
   maxValidationRetries?: number;
   enableTimingLogs?: boolean;
   runtime?: "deep_agent" | "direct";
+  signal?: AbortSignal;
+  requestId?: string;
 };
 
 type TimingEntry = {
@@ -56,13 +58,14 @@ function logTimings(
   word: string,
   timings: TimingEntry[],
   totalDurationMs: number,
+  requestId?: string,
 ): void {
   const details = timings
     .map((timing) => `${timing.stage}=${formatDuration(timing.durationMs)}`)
     .join(" | ");
 
   logInfo(
-    `[spelling-coach timing] word="${word}" total=${formatDuration(totalDurationMs)} | ${details}`,
+    `[spelling-coach timing]${requestId ? ` requestId=${requestId}` : ""} word="${word}" total=${formatDuration(totalDurationMs)} | ${details}`,
   );
 }
 
@@ -311,6 +314,8 @@ export async function runSpellingCoachAgent(
       directModel: options.directModel,
       model: options.model,
       runtime,
+      signal: options.signal,
+      requestId: options.requestId,
     });
     timings.push({
       stage: "level1_word_breakdown_lookup",
@@ -332,10 +337,16 @@ export async function runSpellingCoachAgent(
       runtime,
       timings,
       options.maxValidationRetries ?? 1,
+      options.signal,
     );
 
     if (enableTimingLogs) {
-      logTimings(validatedInput.targetWord, timings, nowMs() - totalStart);
+      logTimings(
+        validatedInput.targetWord,
+        timings,
+        nowMs() - totalStart,
+        options.requestId,
+      );
     }
 
     return minimalOutput;
@@ -360,14 +371,17 @@ export async function runSpellingCoachAgent(
     const invokeStart = nowMs();
     const response =
       runtime === "deep_agent"
-        ? await agent.invoke({ messages })
+        ? await agent.invoke(
+            { messages },
+            options.signal ? { signal: options.signal } : undefined,
+          )
         : await agent.invoke([
             {
               role: "system",
               content: buildDirectRuntimeSystemPrompt(),
             },
             ...messages,
-          ]);
+          ], options.signal ? { signal: options.signal } : undefined);
     timings.push({
       stage: `model_invoke_${attempt + 1}`,
       durationMs: nowMs() - invokeStart,
@@ -447,6 +461,7 @@ export async function runSpellingCoachAgent(
           validatedInput.targetWord,
           timings,
           nowMs() - totalStart,
+          options.requestId,
         );
       }
 
@@ -464,6 +479,7 @@ export async function runSpellingCoachAgent(
             validatedInput.targetWord,
             timings,
             nowMs() - totalStart,
+            options.requestId,
           );
         }
         throw error;
@@ -504,6 +520,7 @@ async function invokeLevelOneCoaching(
   runtime: "deep_agent" | "direct",
   timings: TimingEntry[],
   maxValidationRetries: number,
+  signal?: AbortSignal,
 ): Promise<SpellingCoachOutput> {
   const messages: Array<{ role: "user" | "assistant"; content: string }> = [
     {
@@ -517,14 +534,17 @@ async function invokeLevelOneCoaching(
     const invokeStart = nowMs();
     const response =
       runtime === "deep_agent"
-        ? await (agent as DeepAgentLike).invoke({ messages })
+        ? await (agent as DeepAgentLike).invoke(
+            { messages },
+            signal ? { signal } : undefined,
+          )
         : await (agent as DirectModelLike).invoke([
             {
               role: "system",
               content: buildDirectRuntimeSystemPrompt(),
             },
             ...messages,
-          ]);
+          ], signal ? { signal } : undefined);
     timings.push({
       stage: `level1_model_invoke_${attempt + 1}`,
       durationMs: nowMs() - invokeStart,

@@ -72,6 +72,8 @@ jobs:
           [ -z "${{ secrets.DEV_LANGFUSE_SECRET_KEY }}" ] && MISSING="$MISSING DEV_LANGFUSE_SECRET_KEY"
           [ -z "${{ secrets.DEV_LANGFUSE_BASE_URL }}" ] && MISSING="$MISSING DEV_LANGFUSE_BASE_URL"
           [ -z "${{ secrets.DEV_DB_PASSWORD }}" ] && MISSING="$MISSING DEV_DB_PASSWORD"
+          [ -z "${{ secrets.DEV_APP_BASE_URL }}" ] && MISSING="$MISSING DEV_APP_BASE_URL"
+          [ -z "${{ secrets.DEV_DB_HOST }}" ] && MISSING="$MISSING DEV_DB_HOST"
           
           if [ -n "$MISSING" ]; then
             echo "::error::Missing GitHub Secrets:$MISSING"
@@ -93,6 +95,7 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.DEV_SUPABASE_URL }}
           DB_PASSWORD: ${{ secrets.DEV_DB_PASSWORD }}
+          DB_HOST: ${{ secrets.DEV_DB_HOST }}
 
       - name: Install Vercel CLI
         run: npm install --global vercel@latest
@@ -104,7 +107,19 @@ jobs:
           VERCEL_PROJECT_ID: ${{ secrets.DEV_VERCEL_PROJECT_ID }}
 
       - name: Build Project Artifacts
-        run: vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
+        run: |
+          echo "APP_BASE_URL=${{ secrets.DEV_APP_BASE_URL }}" >> .env
+          echo "DB_HOST=${{ secrets.DEV_DB_HOST }}" >> .env
+          echo "OPENAI_API_KEY=${{ secrets.DEV_OPENAI_API_KEY }}" >> .env
+          echo "SENTRY_DSN=${{ secrets.DEV_SENTRY_DSN }}" >> .env
+          echo "SUPABASE_URL=${{ secrets.DEV_SUPABASE_URL }}" >> .env
+          echo "SUPABASE_PUBLISHABLE_KEY=${{ secrets.DEV_SUPABASE_PUBLISHABLE_KEY }}" >> .env
+          echo "STRIPE_SECRET_KEY=${{ secrets.DEV_STRIPE_SECRET_KEY }}" >> .env
+          echo "STRIPE_PRICE_ID=${{ secrets.DEV_STRIPE_PRICE_ID }}" >> .env
+          echo "LANGFUSE_PUBLIC_KEY=${{ secrets.DEV_LANGFUSE_PUBLIC_KEY }}" >> .env
+          echo "LANGFUSE_SECRET_KEY=${{ secrets.DEV_LANGFUSE_SECRET_KEY }}" >> .env
+          echo "LANGFUSE_BASE_URL=${{ secrets.DEV_LANGFUSE_BASE_URL }}" >> .env
+          vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
         env:
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.DEV_VERCEL_PROJECT_ID }}
@@ -122,6 +137,8 @@ jobs:
         id: deploy
         run: |
           DEPLOY_URL=$(vercel deploy --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }} \
+            --env APP_BASE_URL="${{ secrets.DEV_APP_BASE_URL }}" \
+            --env DB_HOST="${{ secrets.DEV_DB_HOST }}" \
             --env OPENAI_API_KEY="${{ secrets.DEV_OPENAI_API_KEY }}" \
             --env SENTRY_DSN="${{ secrets.DEV_SENTRY_DSN }}" \
             --env SUPABASE_URL="${{ secrets.DEV_SUPABASE_URL }}" \

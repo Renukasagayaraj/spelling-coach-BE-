@@ -49,6 +49,8 @@ type SharedOptions = {
   model?: string | object;
   runtime?: RuntimeMode;
   spellingCoachInput?: SpellingCoachInput;
+  signal?: AbortSignal;
+  requestId?: string;
 };
 
 type TimingEntry = {
@@ -90,13 +92,14 @@ function logTimings(
   word: string,
   timings: TimingEntry[],
   totalDurationMs: number,
+  requestId?: string,
 ): void {
   const details = timings
     .map((timing) => `${timing.stage}=${formatDuration(timing.durationMs)}`)
     .join(" | ");
 
   logInfo(
-    `[${prefix}] word="${word}" total=${formatDuration(totalDurationMs)} | ${details}`,
+    `[${prefix}]${requestId ? ` requestId=${requestId}` : ""} word="${word}" total=${formatDuration(totalDurationMs)} | ${details}`,
   );
 }
 
@@ -275,14 +278,17 @@ async function invokeValidatedJson<T>(
     const invokeStart = nowMs();
     const response =
       runtime === "deep_agent"
-        ? await (invoker as DeepAgentLike).invoke({ messages })
+        ? await (invoker as DeepAgentLike).invoke(
+          { messages },
+          options.signal ? { signal: options.signal } : undefined,
+        )
         : await (invoker as DirectModelLike).invoke([
           {
             role: "system",
             content: buildDirectRuntimeSystemPrompt(),
           },
           ...messages,
-        ]);
+        ], options.signal ? { signal: options.signal } : undefined);
     timings?.push({
       stage: `${stagePrefix}_invoke_${attempt + 1}`,
       durationMs: nowMs() - invokeStart,
@@ -515,6 +521,7 @@ export async function runSplitSpellingCoachAgent(
     validatedInput.targetWord,
     timings,
     nowMs() - totalStart,
+    options.requestId,
   );
 
   return result;

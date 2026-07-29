@@ -46,6 +46,7 @@ export type ImportCustomWordsResult = {
   };
   importedCount: number;
   skippedExistingCount: number;
+  listWords: WordEntry[];
   words: WordEntry[];
 };
 
@@ -330,6 +331,7 @@ export async function importCustomWords(
       existingList && !parsedRequest.overwriteList
         ? words.length - wordsToGenerate.length
         : 0,
+    listWords: mergedWords,
     words: importedWordEntries,
   };
 }

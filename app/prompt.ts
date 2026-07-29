@@ -531,6 +531,58 @@ export function buildSpellingCoachPrompt(input: SpellingCoachInput): string {
   return promptParts.join("\n\n");
 }
 
+export const STREAMING_RUNTIME_MARKERS = [
+  "[[MISS_ANALYSIS]]",
+  "[[EXPLANATION]]",
+  "[[MEMORY_TIP]]",
+] as const;
+
+export const STREAMING_RUNTIME_END_MARKER = "[[END_SECTION]]";
+
+export const SPELLING_COACH_STREAMING_RUNTIME_SYSTEM_PROMPT = `You are an expert spelling coach for children.
+
+Output only the three required sections, in this exact order:
+[[MISS_ANALYSIS]]
+[[EXPLANATION]]
+[[MEMORY_TIP]]
+
+You may close any section with:
+[[END_SECTION]]
+
+Rules:
+- output no JSON
+- output no markdown
+- output no extra commentary
+- output sections only
+- keep required ordering`;
+
+export function buildStreamingRuntimePrompt(
+  input: SpellingCoachInput,
+  precomputed: string,
+): string {
+  return [
+    "Write only runtime coaching prose for this spelling attempt.",
+    "Use exactly these required section markers in order:",
+    STREAMING_RUNTIME_MARKERS.join("\n"),
+    "Optional close marker:",
+    STREAMING_RUNTIME_END_MARKER,
+    "Do not output JSON.",
+    "Do not output markdown.",
+    "Do not output any text before the first marker.",
+    "Do not output any section other than these three sections.",
+    "Keep the MISS_ANALYSIS section focused on what happened in the child's spelling attempt.",
+    "Keep the EXPLANATION section focused on the correction path and the most useful spelling idea.",
+    ...getMemoryTipPromptGuidance(input.targetWord).map((line) =>
+      line.replace(/coachingText\.memoryTip/g, "the MEMORY_TIP section"),
+    ),
+    "Use this deterministic miss and word context. Do not change correctness.",
+    "Precomputed teaching JSON:",
+    precomputed,
+    "Input JSON:",
+    JSON.stringify(input, null, 2),
+  ].join("\n\n");
+}
+
 export function buildWordTeachingPrecomputePrompt(
   input: SpellingCoachInput,
 ): string {

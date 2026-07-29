@@ -36,6 +36,12 @@ import {
   ForeignOriginImportRequestSchema,
   importForeignOriginWords,
 } from "./foreignOriginImport.js";
+import {
+  FileImportRequestError,
+  MAX_IMPORT_REQUEST_BYTES,
+  handleImportFileRequest,
+  getImportJob,
+} from "./fileImportHandler.js";
 import { getConfiguredModelName } from "./modelConfig.js";
 import { isNewDeterministicPatternMatcherEnabled } from "./newPatternMatcher.js";
 import { hasWordTeachingPrecompute, runSplitSpellingCoachAgent, warmWordTeachingPrecompute } from "./optimizedCoach.js";
@@ -46,6 +52,11 @@ import {
   isSpellingRuleShortlistEnabled,
 } from "./referenceData.js";
 import { runSpellingCoachAgent } from "./runAgent.js";
+import {
+  readSpellingCoachStreamRequest,
+  SpellingCoachStreamRequestError,
+  streamSpellingCoach,
+} from "./streamingCoach.js";
 import { recordSpellingCoachTrace, recordImportListTrace } from "./langfuse.js";
 import { MockBeeService } from "./mockBee.js";
 import {
@@ -66,7 +77,6 @@ import {
   VoiceRespondRequestSchema,
 } from "./voice.js";
 import Stripe from "stripe";
-
 let stripeInstance: Stripe | null = null;
 function getStripe(): Stripe {
   if (!stripeInstance) {
@@ -169,14 +179,30 @@ function collectBody(request: import("node:http").IncomingMessage): Promise<stri
 
 function collectBinaryBody(
   request: import("node:http").IncomingMessage,
+  maxBytes = Number.POSITIVE_INFINITY,
 ): Promise<Uint8Array> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    let settled = false;
     request.on("data", (chunk) => {
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      if (settled) return;
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      totalBytes += buffer.length;
+      if (totalBytes > maxBytes) {
+        settled = true;
+        reject(new FileImportRequestError("Uploaded file is too large.", 413));
+        request.resume();
+        return;
+      }
+      chunks.push(buffer);
     });
-    request.on("end", () => resolve(new Uint8Array(Buffer.concat(chunks))));
-    request.on("error", reject);
+    request.on("end", () => {
+      if (!settled) resolve(new Uint8Array(Buffer.concat(chunks)));
+    });
+    request.on("error", (error) => {
+      if (!settled) reject(error);
+    });
   });
 }
 
@@ -334,7 +360,7 @@ export default async function handler(
       const encodedWord = parts[3];
       const tail = parts[4];
 
-      if (tail === "pronunciation") {
+      if (tail === "pronunciation" || encodedWord === "import-jobs") {
         // handled below
       } else if (encodedWord) {
         const word = decodeURIComponent(encodedWord);
@@ -884,6 +910,52 @@ export default async function handler(
       return;
     }
 
+    if (
+      request.method === "POST" &&
+      url.pathname === "/api/spelling-coach/stream"
+    ) {
+      let requestBody: unknown;
+      try {
+        requestBody = await readSpellingCoachStreamRequest(request);
+      } catch (error) {
+        if (error instanceof SpellingCoachStreamRequestError) {
+          logInfo(
+            `[spelling-coach stream] rejected invalid request: ${error.message}`,
+          );
+          if (!response.destroyed) {
+            sendJson(response, error.statusCode, { error: error.message });
+          }
+          return;
+        }
+        throw error;
+      }
+
+      try {
+        await streamSpellingCoach(
+          request,
+          response,
+          requestBody,
+          undefined,
+          requestStart,
+        );
+      } catch (error) {
+        logError("Spelling coach streaming API error:", error);
+        Sentry.captureException(error);
+        if (!response.destroyed && !response.headersSent) {
+          sendJson(
+            response,
+            500,
+            {
+              error: "Streaming request failed.",
+            },
+          );
+        } else if (!response.destroyed && !response.writableEnded) {
+          response.end();
+        }
+      }
+      return;
+    }
+
     if (request.method === "POST" && url.pathname === "/api/words/import-custom") {
       const startTime = Date.now();
       const rawBody = await collectBody(request);
@@ -909,7 +981,7 @@ export default async function handler(
         authHeader,
         user.id,
         requestBody.listName,
-        result.words,
+        result.listWords,
         requestBody.listId || result.list.id,
       );
 
@@ -934,6 +1006,47 @@ export default async function handler(
         importedCount: result.importedCount,
         skippedExistingCount: result.skippedExistingCount,
       });
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/words/import-file") {
+      try {
+        const user = await authenticateRequest(request);
+        const rawBytes = await collectBinaryBody(request, MAX_IMPORT_REQUEST_BYTES);
+        const result = await handleImportFileRequest(request, Buffer.from(rawBytes), user);
+
+        sendJson(response, 202, result);
+      } catch (error) {
+        if (isAuthError(error)) throw error;
+        const statusCode = error instanceof FileImportRequestError ? error.statusCode : 500;
+        if (statusCode >= 500) {
+          logError("File import request failed:", error);
+          Sentry.captureException(error);
+        }
+        sendJson(response, statusCode, {
+          error: error instanceof Error ? error.message : "File import failed.",
+        });
+      }
+      return;
+    }
+
+    if (
+      request.method === "GET" &&
+      /^\/api\/words\/import-jobs\/[^/]+$/.test(url.pathname)
+    ) {
+      const parts = url.pathname.split("/").filter(Boolean);
+      const jobId = decodeURIComponent(parts[3] ?? "");
+      if (!jobId) {
+        sendJson(response, 400, { error: "Job ID is required." });
+        return;
+      }
+      const user = await authenticateRequest(request);
+      const job = getImportJob(jobId, user.id);
+      if (!job) {
+        sendJson(response, 404, { error: "Import job not found or expired." });
+        return;
+      }
+      sendJson(response, 200, job);
       return;
     }
 
@@ -1200,6 +1313,15 @@ export default async function handler(
   } catch (error) {
     logError("Spelling coach API error:", error);
     Sentry.captureException(error);
+    if (response.destroyed) {
+      return;
+    }
+    if (response.headersSent) {
+      if (!response.writableEnded) {
+        response.end();
+      }
+      return;
+    }
     if (
       error instanceof Error &&
       error.message.startsWith("Unknown mock bee session:")

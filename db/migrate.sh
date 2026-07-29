@@ -20,13 +20,16 @@ shift 2>/dev/null || true
 # Extract project reference from SUPABASE_URL if present
 if [ -n "$SUPABASE_URL" ]; then
   PROJECT_REF=$(echo "$SUPABASE_URL" | sed -E 's|https://([^/:]+)\.supabase\.co.*|\1|')
-else
-  PROJECT_REF="xszzpzmxqzjwwuohignv"
+elif [ -z "$PROJECT_REF" ]; then
+  echo "Error: PROJECT_REF or SUPABASE_URL environment variable is missing."
+  exit 1
 fi
 
 # Connect using Supabase's Session Pooler to support IPv4 on Docker.
-# Your project is assigned to aws-1-us-west-1.pooler.supabase.com
-DB_HOST="aws-1-us-west-1.pooler.supabase.com"
+if [ -z "$DB_HOST" ]; then
+  echo "Error: DB_HOST environment variable is missing."
+  exit 1
+fi
 DB_PORT=${DB_PORT:-5432}
 DB_USER="postgres.$PROJECT_REF"
 DB_NAME=${DB_NAME:-postgres}
@@ -57,5 +60,7 @@ docker run --rm \
   -user="$DB_USER" \
   -password="$DB_PASSWORD" \
   -connectRetries=60 \
+  -baselineOnMigrate=true \
+  -baselineVersion=0 \
   "$COMMAND" "$@"
 

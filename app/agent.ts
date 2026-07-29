@@ -113,5 +113,5 @@ Architecture constraints:
 - No persistence.
 - No session orchestration.
 - Focus only on spelling miss analysis and coaching output.`,
-  }) as DeepAgentLike;
+  } as Parameters<typeof create_deep_agent>[0] & { instructions: string }) as DeepAgentLike;
 }

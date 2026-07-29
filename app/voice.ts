@@ -484,7 +484,7 @@ export async function transcribeAudio(
   fileName = "voice.webm",
 ): Promise<string> {
   const openai = getOpenAIClient();
-  const file = new File([audio], fileName, { type: mimeType });
+  const file = new File([audio as unknown as BlobPart], fileName, { type: mimeType });
   const transcription = await openai.audio.transcriptions.create({
     file,
     model: "gpt-4o-mini-transcribe",

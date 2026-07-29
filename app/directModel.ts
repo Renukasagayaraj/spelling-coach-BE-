@@ -3,6 +3,10 @@ import { DEFAULT_MODEL_NAME, getConfiguredModelName, getOpenAITemperature } from
 
 export type DirectModelLike = {
   invoke(input: unknown, options?: any): Promise<unknown>;
+  stream?(
+    input: unknown,
+    options?: any,
+  ): AsyncIterable<unknown> | Promise<AsyncIterable<unknown>>;
 };
 
 type ChatAnthropicCtor = typeof import("@langchain/anthropic")["ChatAnthropic"];

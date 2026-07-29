@@ -160,7 +160,7 @@ function buildSilentLetterFacts(
   patterns: Array<{ label: string }>,
 ): StoredTeachingFact[] {
   return patterns
-    .map((pattern) => {
+    .map((pattern): StoredTeachingFact | null => {
       const match = pattern.label.match(/^silent ([a-z]+) \(phoneme-validated\)$/i);
       if (!match) {
         return null;
@@ -171,7 +171,7 @@ function buildSilentLetterFacts(
         text: grapheme,
         label: `silent ${grapheme}`,
         reason: `The ${grapheme} is written but not pronounced.`,
-        source: "phoneme-validated" as const,
+        source: "phoneme-validated",
       };
     })
     .filter((value): value is StoredTeachingFact => value !== null);

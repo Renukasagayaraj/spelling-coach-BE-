@@ -47,6 +47,9 @@ jobs:
 
       - name: Run Tests
         run: npm test
+        env:
+          SUPABASE_URL: ${{ secrets.PROD_SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.PROD_SUPABASE_PUBLISHABLE_KEY }}
 
   verify:
     name: Verify Secrets
@@ -68,6 +71,9 @@ jobs:
           [ -z "${{ secrets.PROD_LANGFUSE_PUBLIC_KEY }}" ] && MISSING="$MISSING PROD_LANGFUSE_PUBLIC_KEY"
           [ -z "${{ secrets.PROD_LANGFUSE_SECRET_KEY }}" ] && MISSING="$MISSING PROD_LANGFUSE_SECRET_KEY"
           [ -z "${{ secrets.PROD_LANGFUSE_BASE_URL }}" ] && MISSING="$MISSING PROD_LANGFUSE_BASE_URL"
+          [ -z "${{ secrets.PROD_APP_BASE_URL }}" ] && MISSING="$MISSING PROD_APP_BASE_URL"
+          [ -z "${{ secrets.PROD_DB_HOST }}" ] && MISSING="$MISSING PROD_DB_HOST"
+          [ -z "${{ secrets.PROD_DB_PASSWORD }}" ] && MISSING="$MISSING PROD_DB_PASSWORD"
           
           if [ -n "$MISSING" ]; then
             echo "::error::Missing GitHub Secrets:$MISSING"
@@ -82,6 +88,15 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      - name: Run Database Migrations (Flyway)
+        run: |
+          chmod +x db/migrate.sh
+          ./db/migrate.sh migrate
+        env:
+          SUPABASE_URL: ${{ secrets.PROD_SUPABASE_URL }}
+          DB_PASSWORD: ${{ secrets.PROD_DB_PASSWORD }}
+          DB_HOST: ${{ secrets.PROD_DB_HOST }}
+
       - name: Install Vercel CLI
         run: npm install --global vercel@latest
 
@@ -92,7 +107,19 @@ jobs:
           VERCEL_PROJECT_ID: ${{ secrets.PROD_VERCEL_PROJECT_ID }}
 
       - name: Build Project Artifacts
-        run: vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
+        run: |
+          echo "APP_BASE_URL=${{ secrets.PROD_APP_BASE_URL }}" >> .env
+          echo "DB_HOST=${{ secrets.PROD_DB_HOST }}" >> .env
+          echo "OPENAI_API_KEY=${{ secrets.PROD_OPENAI_API_KEY }}" >> .env
+          echo "SENTRY_DSN=${{ secrets.PROD_SENTRY_DSN }}" >> .env
+          echo "SUPABASE_URL=${{ secrets.PROD_SUPABASE_URL }}" >> .env
+          echo "SUPABASE_PUBLISHABLE_KEY=${{ secrets.PROD_SUPABASE_PUBLISHABLE_KEY }}" >> .env
+          echo "STRIPE_SECRET_KEY=${{ secrets.PROD_STRIPE_SECRET_KEY }}" >> .env
+          echo "STRIPE_PRICE_ID=${{ secrets.PROD_STRIPE_PRICE_ID }}" >> .env
+          echo "LANGFUSE_PUBLIC_KEY=${{ secrets.PROD_LANGFUSE_PUBLIC_KEY }}" >> .env
+          echo "LANGFUSE_SECRET_KEY=${{ secrets.PROD_LANGFUSE_SECRET_KEY }}" >> .env
+          echo "LANGFUSE_BASE_URL=${{ secrets.PROD_LANGFUSE_BASE_URL }}" >> .env
+          vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}
         env:
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.PROD_VERCEL_PROJECT_ID }}
@@ -110,6 +137,8 @@ jobs:
         id: deploy
         run: |
           DEPLOY_URL=$(vercel deploy --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }} \
+            --env APP_BASE_URL="${{ secrets.PROD_APP_BASE_URL }}" \
+            --env DB_HOST="${{ secrets.PROD_DB_HOST }}" \
             --env OPENAI_API_KEY="${{ secrets.PROD_OPENAI_API_KEY }}" \
             --env SENTRY_DSN="${{ secrets.PROD_SENTRY_DSN }}" \
             --env SUPABASE_URL="${{ secrets.PROD_SUPABASE_URL }}" \

@@ -965,7 +965,7 @@ export function normalizeMissAnalysisErrorTypes(
 
   if (
     output.missAnalysis.likelyWrongWordInterpretation &&
-    primary.type !== "wrong_word_interpretation" &&
+    (primary.type as string) !== "wrong_word_interpretation" &&
     !secondaryErrorTypes.includes("wrong_word_interpretation")
   ) {
     secondaryErrorTypes.push("wrong_word_interpretation");

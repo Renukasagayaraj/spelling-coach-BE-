@@ -48,7 +48,6 @@ import {
 } from "./prompt.js";
 import { runSpellingCoachAgent } from "./runAgent.js";
 import { interpretVoiceUtterance, normalizeSpokenSpelling } from "./voice.js";
-import { InMemoryMockBeeSessionStore, MockBeeService } from "./mockBee.js";
 import {
   buildReferenceHintsText,
   buildSpellingRuleHintsText,
@@ -1779,6 +1778,7 @@ test("replaces generic precompute chunk reasoning with concrete chunk split", ()
         morphologyFocus: "",
         originLabels: [],
         morphologyLabels: [],
+        relatedForms: [],
       },
     },
     wordBreakdown: {
@@ -3371,7 +3371,7 @@ test("classifies the flabbergast miss table with stable primary and secondary si
 
     for (const secondary of testCase.secondaries) {
       assert.equal(
-        result.missAnalysis.secondaryErrorTypes.includes(secondary),
+        result.missAnalysis.secondaryErrorTypes.includes(secondary as any),
         true,
         `missing secondary ${secondary} for ${testCase.attempt}`,
       );
@@ -3945,6 +3945,9 @@ test("sanitizes coaching full explanation wording to avoid 'the child wrote'", a
           primaryErrorFocus: "Keep the root chunk 'phan' instead of 'phon'.",
         },
         coachingText: {
+          shortFeedback: "Try again.",
+          memoryTip: "Remember the phan chunk.",
+          sayAloudTip: "Say di-a-phan-ous.",
           fullExplanation:
             "The tricky part here is the root chunk 'phan' which uses the 'ph' digraph to make the /f/ sound. The child wrote 'phon' instead, which is a common sound but not correct in this word. Remembering the 'ph' pattern and the chunk 'phan' will help you spell 'diaphanous' correctly.",
         },
@@ -4779,15 +4782,15 @@ test("adds new matcher patterns to word breakdown", () => {
   const output = applyNewPatternsToOutput("ghost", makeOutput({}));
 
   assert.equal(
-    output.wordBreakdown.matchedPatterns.some(
+    output.wordBreakdown.matchedPatterns?.some(
       (pattern) => pattern.label === "digraph gh",
-    ),
+    ) ?? false,
     true,
   );
   assert.equal(
-    output.wordBreakdown.matchedPatterns.some(
+    output.wordBreakdown.matchedPatterns?.some(
       (pattern) => pattern.label === "blend st",
-    ),
+    ) ?? false,
     true,
   );
 });
@@ -4922,6 +4925,8 @@ test("merges stored sound-aware patterns into matched patterns for pilot words",
               ],
               friendly_chunks: ["SIH", "tee"],
               say_aloud_tip: "Say it slowly: SIH-tee",
+              silent_letters: [],
+              tricky_parts: [],
             },
           },
         ],
@@ -4931,17 +4936,17 @@ test("merges stored sound-aware patterns into matched patterns for pilot words",
     const storedBreakdown = getStoredWordBreakdown("city");
     assert.ok(storedBreakdown);
     assert.equal(
-      storedBreakdown?.matchedPatterns.some(
+      storedBreakdown?.matchedPatterns?.some(
         (pattern) => pattern.label === "soft c (phoneme-validated)",
-      ),
+      ) ?? false,
       true,
     );
 
     const output = applyNewPatternsToOutput("city", makeOutput({}));
     assert.equal(
-      output.wordBreakdown.matchedPatterns.some(
+      output.wordBreakdown.matchedPatterns?.some(
         (pattern) => pattern.label === "soft c (phoneme-validated)",
-      ),
+      ) ?? false,
       true,
     );
   } finally {
@@ -4950,11 +4955,42 @@ test("merges stored sound-aware patterns into matched patterns for pilot words",
 });
 
 test("uses friendly pronunciation cue for words with stored phonemes", () => {
-  assert.equal(getFriendlyPronunciationCue("about"), "Say it slowly: uh-BOWT");
-  assert.equal(
-    getFriendlyPronunciationCue("aberration"),
-    "Say it slowly: a-ber-AY-shuhn",
-  );
+  const originalCustomLists = loadCustomWordLists();
+  const aberration = getWordByText("aberration");
+  assert.ok(aberration);
+
+  try {
+    saveCustomWordLists([
+      {
+        id: "friendly-pronunciation-test",
+        name: "Friendly Pronunciation Test",
+        owner_user_id: "test-user",
+        words: [
+          {
+            ...aberration,
+            phoneme_metadata: {
+              source: "g2p-en",
+              phonemes: ["AE2", "B", "ER0", "EY1", "SH", "AH0", "N"],
+              sound_aware_patterns: [],
+              friendly_chunks: ["a", "ber", "AY", "shuhn"],
+              say_aloud_tip: "Say it slowly: a-ber-AY-shuhn",
+              pronunciation_confidence: "high",
+              silent_letters: [],
+              tricky_parts: [],
+            },
+          },
+        ],
+      },
+    ]);
+
+    assert.equal(getFriendlyPronunciationCue("about"), "Say it slowly: uh-BOWT");
+    assert.equal(
+      getFriendlyPronunciationCue("aberration"),
+      "Say it slowly: a-ber-AY-shuhn",
+    );
+  } finally {
+    saveCustomWordLists(originalCustomLists);
+  }
 });
 
 test("adds deterministic sound-aware notes to stored say-aloud tips", () => {
@@ -5098,6 +5134,8 @@ test("prefers stored say-aloud tip metadata when available", () => {
               sound_aware_patterns: [],
               friendly_chunks: ["sih", "TEE"],
               say_aloud_tip: "Say it slowly: SIH-tee",
+              silent_letters: [],
+              tricky_parts: [],
             },
           },
         ],
@@ -5654,128 +5692,4 @@ test("adds guided pronunciation instructions for risky words with friendly chunk
       process.env.SPELLING_COACH_TTS_INSTRUCTIONS = original;
     }
   }
-});
-
-test("mock bee session exposes challenge metadata without leaking the target word", async () => {
-  const service = new MockBeeService(
-    new InMemoryMockBeeSessionStore(),
-    async (word) =>
-      makeOutput({
-        correctness: {
-          isCorrect: true,
-          reinforceSuccess: true,
-        },
-        coachingText: {
-          shortFeedback: "",
-          fullExplanation: "",
-          memoryTip: "",
-          sayAloudTip: `Say it slowly: ${word.word}.`,
-        },
-      }),
-  );
-
-  const result = await service.createSession({
-    level: "1",
-    wordSource: "standard",
-    wordCount: 10,
-    childProfile: baseProfile,
-  });
-
-  assert.equal(result.status, "active");
-  assert.equal(result.currentChallenge?.timer.secondsPerWord, 60);
-  assert.equal(result.currentChallenge?.timer.showCountdown, false);
-  assert.equal(result.currentChallenge?.timer.readyPromptAtElapsedSeconds, 45);
-  assert.equal("word" in (result.currentChallenge?.supports ?? {}), false);
-  assert.equal(typeof result.currentChallenge?.supports.definition, "string");
-});
-
-test("mock bee reveals the answer on level 2 submit but not on level 3 submit", async () => {
-  const service = new MockBeeService(
-    new InMemoryMockBeeSessionStore(),
-    async (word) =>
-      makeOutput({
-        correctness: {
-          isCorrect: true,
-          reinforceSuccess: true,
-        },
-        coachingText: {
-          shortFeedback: "",
-          fullExplanation: "",
-          memoryTip: "",
-          sayAloudTip: `Say it slowly: ${word.word}.`,
-        },
-      }),
-  );
-
-  const levelTwo = await service.createSession({
-    level: "2",
-    wordSource: "standard",
-    wordCount: 10,
-    childProfile: baseProfile,
-  });
-  const levelTwoInternal = await service.getInternalSession(levelTwo.id);
-  const levelTwoSubmit = await service.submitAttempt(levelTwo.id, {
-    childAttempt: levelTwoInternal.turns[0].word.word,
-  });
-
-  assert.equal(levelTwoSubmit.result.isCorrect, true);
-  assert.equal(levelTwoSubmit.result.revealAnswer, true);
-  assert.equal(
-    levelTwoSubmit.result.correctWord,
-    levelTwoInternal.turns[0].word.word,
-  );
-
-  const levelThree = await service.createSession({
-    level: "3",
-    wordSource: "standard",
-    wordCount: 10,
-    childProfile: baseProfile,
-  });
-  const levelThreeInternal = await service.getInternalSession(levelThree.id);
-  const levelThreeSubmit = await service.submitAttempt(levelThree.id, {
-    childAttempt: levelThreeInternal.turns[0].word.word,
-  });
-
-  assert.equal(levelThreeSubmit.result.isCorrect, true);
-  assert.equal(levelThreeSubmit.result.revealAnswer, false);
-  assert.equal(levelThreeSubmit.result.correctWord, undefined);
-});
-
-test("mock bee timeout advances the round and review cards populate asynchronously", async () => {
-  const service = new MockBeeService(
-    new InMemoryMockBeeSessionStore(),
-    async (word) =>
-      makeOutput({
-        correctness: {
-          isCorrect: false,
-          reinforceSuccess: false,
-        },
-        coachingText: {
-          shortFeedback: "",
-          fullExplanation: `Review ${word.word}.`,
-          memoryTip: "",
-          sayAloudTip: `Say it slowly: ${word.word}.`,
-        },
-      }),
-  );
-
-  const session = await service.createSession({
-    level: "1",
-    wordSource: "standard",
-    wordCount: 10,
-    childProfile: baseProfile,
-  });
-
-  const timeoutResult = await service.timeoutCurrentWord(session.id);
-  assert.equal(timeoutResult.result.timedOut, true);
-  assert.equal(timeoutResult.session.progress.currentTurnNumber, 2);
-
-  await flushMicrotasks();
-  const review = await service.getReview(session.id);
-  assert.equal(review.reviewStatus.completed >= 1, true);
-  assert.equal(review.words[0]?.status, "timed_out");
-  assert.equal(
-    typeof review.words[0]?.reviewCard?.coachingText.sayAloudTip,
-    "string",
-  );
 });

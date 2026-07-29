@@ -173,7 +173,7 @@ export async function fetchCustomListsFromDB(authToken: string, userId: string) 
   return (data || []).map((list: any) => ({
     id: list.id as string,
     name: list.name as string,
-    wordCount: Number(list.word_count) || 0,
+    wordCount: Number(list.word_count ?? (Array.isArray(list.words) ? list.words.length : 0)) || 0,
   }));
 }
 
@@ -311,18 +311,18 @@ export async function updateUserProfileInDB(
  */
 export type StartPracticeSessionResult =
   | {
-    action: "created";
-    sessionId: string;
-  }
+      action: "created";
+      sessionId: string;
+    }
   | {
-    action: "resume_existing";
-    sessionId: string;
-  }
+      action: "resume_existing";
+      sessionId: string;
+    }
   | {
-    action: "active_session_conflict";
-    activeSessionId: string;
-    activeMode: string;
-  };
+      action: "active_session_conflict";
+      activeSessionId: string;
+      activeMode: string;
+    };
 
 export type PracticeSessionStatus = "active" | "completed" | "abandoned";
 
@@ -425,18 +425,31 @@ export async function startPracticeSessionInDB(
     }, "abandoned");
   }
 
-  const { data, error } = await userClient
+  const insertPayload: Record<string, unknown> = {
+    user_id: userId,
+    mode: scope.dbMode,
+    status: "active",
+    origin_language: scope.originLanguage,
+    custom_list_id: scope.customListId,
+    session_started_at: new Date().toISOString(),
+  };
+
+  let { data, error } = await userClient
     .from("practice_sessions")
-    .insert({
-      user_id: userId,
-      mode: scope.dbMode,
-      status: "active",
-      origin_language: scope.originLanguage,
-      custom_list_id: scope.customListId,
-      session_started_at: new Date().toISOString(),
-    })
+    .insert(insertPayload)
     .select("id")
     .single();
+
+  if (error && (error.code === "PGRST204" || error.message?.includes("custom_list_name"))) {
+    delete insertPayload.custom_list_name;
+    const retry = await userClient
+      .from("practice_sessions")
+      .insert(insertPayload)
+      .select("id")
+      .single();
+    data = retry.data;
+    error = retry.error;
+  }
 
   if (error) {
     throw error;
@@ -444,7 +457,7 @@ export async function startPracticeSessionInDB(
 
   return {
     action: "created",
-    sessionId: data.id as string,
+    sessionId: data!.id as string,
   };
 }
 
@@ -658,6 +671,16 @@ export async function getPracticeSessionFromDB(
     .maybeSingle();
 
   if (error) {
+    if (error.code === "PGRST204" || error.message?.includes("custom_list_name")) {
+      const { data: fallbackData, error: fallbackError } = await userClient
+        .from("practice_sessions")
+        .select("id, mode, status, session_started_at, session_ended_at, origin_language, custom_list_id")
+        .eq("id", sessionId)
+        .eq("user_id", userId)
+        .maybeSingle();
+      if (fallbackError) throw fallbackError;
+      return fallbackData;
+    }
     throw error;
   }
   return data;

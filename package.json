@@ -12,7 +12,8 @@
     "precompute:g2p-pilot": "tsx scripts/precomputeG2pPilot.ts",
     "precompute:phonemes": "tsx scripts/precomputeWordPhonemes.ts",
     "audit:pronunciations": "tsx scripts/auditFriendlyPronunciations.ts",
-    "test": "tsx --test app/testCases.ts"
+    "test": "tsx --experimental-test-module-mocks --test app/tests/*.test.ts",
+    "test:coverage": "tsx --experimental-test-module-mocks --test --experimental-test-coverage --test-coverage-include='app/*.ts' --test-coverage-include='api/*.ts' --test-coverage-exclude='app/testCases.ts' app/tests/*.test.ts"
   },
   "dependencies": {
     "@langchain/anthropic": "^1.4.0",
