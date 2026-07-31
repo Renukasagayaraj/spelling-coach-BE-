@@ -242,6 +242,7 @@ export interface UserProfile {
   age: number | null;
   grade: string | null;
   spelling_level: string | null;
+  weekly_email_enabled: boolean;
 }
 
 /**
@@ -251,7 +252,7 @@ export async function fetchUserProfileFromDB(authToken: string, userId: string, 
   const userClient = getSupabaseUserClient(authToken);
   const { data, error } = await userClient
     .from("users")
-    .select("id, email, full_name, theme_preference, audio_enabled, child_id, age, grade, spelling_level")
+    .select("id, email, full_name, theme_preference, audio_enabled, child_id, age, grade, spelling_level, weekly_email_enabled")
     .eq("id", userId)
     .maybeSingle();
 
@@ -270,9 +271,9 @@ export async function fetchUserProfileFromDB(authToken: string, userId: string, 
         child_id: "c1",
         age: 10,
         grade: "5",
-        spelling_level: "competition",
+        spelling_level: "competition", weekly_email_enabled: false,
       })
-      .select("id, email, full_name, theme_preference, audio_enabled, child_id, age, grade, spelling_level")
+      .select("id, email, full_name, theme_preference, audio_enabled, child_id, age, grade, spelling_level, weekly_email_enabled")
       .maybeSingle();
 
     if (insertError) {
@@ -297,7 +298,7 @@ export async function updateUserProfileInDB(
     .from("users")
     .update(updates)
     .eq("id", userId)
-    .select("id, email, full_name, theme_preference, audio_enabled, child_id, age, grade, spelling_level")
+    .select("id, email, full_name, theme_preference, audio_enabled, child_id, age, grade, spelling_level, weekly_email_enabled")
     .single();
 
   if (error) {
@@ -311,18 +312,18 @@ export async function updateUserProfileInDB(
  */
 export type StartPracticeSessionResult =
   | {
-      action: "created";
-      sessionId: string;
-    }
+    action: "created";
+    sessionId: string;
+  }
   | {
-      action: "resume_existing";
-      sessionId: string;
-    }
+    action: "resume_existing";
+    sessionId: string;
+  }
   | {
-      action: "active_session_conflict";
-      activeSessionId: string;
-      activeMode: string;
-    };
+    action: "active_session_conflict";
+    activeSessionId: string;
+    activeMode: string;
+  };
 
 export type PracticeSessionStatus = "active" | "completed" | "abandoned";
 
@@ -425,31 +426,18 @@ export async function startPracticeSessionInDB(
     }, "abandoned");
   }
 
-  const insertPayload: Record<string, unknown> = {
-    user_id: userId,
-    mode: scope.dbMode,
-    status: "active",
-    origin_language: scope.originLanguage,
-    custom_list_id: scope.customListId,
-    session_started_at: new Date().toISOString(),
-  };
-
-  let { data, error } = await userClient
+  const { data, error } = await userClient
     .from("practice_sessions")
-    .insert(insertPayload)
+    .insert({
+      user_id: userId,
+      mode: scope.dbMode,
+      status: "active",
+      origin_language: scope.originLanguage,
+      custom_list_id: scope.customListId,
+      session_started_at: new Date().toISOString(),
+    })
     .select("id")
     .single();
-
-  if (error && (error.code === "PGRST204" || error.message?.includes("custom_list_name"))) {
-    delete insertPayload.custom_list_name;
-    const retry = await userClient
-      .from("practice_sessions")
-      .insert(insertPayload)
-      .select("id")
-      .single();
-    data = retry.data;
-    error = retry.error;
-  }
 
   if (error) {
     throw error;
@@ -480,6 +468,7 @@ export async function recordWordAttemptInDB(
 ) {
   const userClient = getSupabaseUserClient(authToken);
   const scope = resolvePracticeScope(mode, level);
+  const normalizedCoachingResponse = normalizeCoachingResponseForStorage(coachingResponse);
   const { data, error } = await userClient
     .from("word_attempts")
     .insert({
@@ -495,7 +484,7 @@ export async function recordWordAttemptInDB(
       part_of_speech_viewed: partOfSpeechViewed,
       repeat_word_count: repeatWordCount || 0,
       used_voice_input: usedVoiceInput,
-      coaching_response: coachingResponse,
+      coaching_response: normalizedCoachingResponse,
     })
     .select("id")
     .single();
@@ -586,6 +575,43 @@ export async function recordWordAttemptInDB(
   return data.id as string;
 }
 
+export async function updateWordAttemptCoachingResponseInDB(
+  authToken: string,
+  userId: string,
+  attemptId: string,
+  coachingResponse: string,
+) {
+  const userClient = getSupabaseUserClient(authToken);
+  const normalizedCoachingResponse = normalizeCoachingResponseForStorage(coachingResponse);
+
+  const { error } = await userClient
+    .from("word_attempts")
+    .update({
+      coaching_response: normalizedCoachingResponse,
+    })
+    .eq("id", attemptId)
+    .eq("user_id", userId);
+
+  if (error) throw error;
+}
+
+function normalizeCoachingResponseForStorage(
+  coachingResponse?: string,
+): Record<string, unknown> | null {
+  if (!coachingResponse) {
+    return null;
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(coachingResponse);
+    return parsed && typeof parsed === "object"
+      ? (parsed as Record<string, unknown>)
+      : { legacyText: coachingResponse };
+  } catch {
+    return { legacyText: coachingResponse };
+  }
+}
+
 /**
  * End a practice session in the DB.
  */
@@ -657,6 +683,113 @@ export async function getSessionAttemptsFromDB(
   return data;
 }
 
+/**
+ * Fetch the source data used by the reports dashboard.  Both queries are
+ * scoped to the authenticated user so the report can never include another
+ * user's practice history.
+ */
+export async function getReportDataFromDB(
+  authToken: string,
+  userId: string,
+  fromDate: string | undefined,
+  includeCustomLists: boolean,
+) {
+  const userClient = getSupabaseUserClient(authToken);
+
+  let sessionsQuery = userClient
+    .from("practice_sessions")
+    // Select all available columns. This lets reports work safely with an
+    // older database that has not yet received every optional migration.
+    .select("*")
+    .eq("user_id", userId)
+    .order("session_started_at", { ascending: false });
+
+  let attemptsQuery = userClient
+    .from("word_attempts")
+    .select("*")
+    .eq("user_id", userId)
+    .order("created_at", { ascending: false });
+
+  const customListsQuery = includeCustomLists
+    ? userClient
+      .from("custom_word_lists")
+      .select("id, words")
+      .eq("owner_user_id", userId)
+    : Promise.resolve({ data: [], error: null });
+
+  if (fromDate) {
+    sessionsQuery = sessionsQuery.gte("session_started_at", fromDate);
+    attemptsQuery = attemptsQuery.gte("created_at", fromDate);
+  }
+
+  const [
+    { data: sessions, error: sessionsError },
+    { data: attempts, error: attemptsError },
+    { data: customLists, error: customListsError },
+  ] = await Promise.all([sessionsQuery, attemptsQuery, customListsQuery]);
+
+  if (sessionsError) throw sessionsError;
+  if (attemptsError) throw attemptsError;
+  if (customListsError) throw customListsError;
+
+  return {
+    sessions: sessions ?? [],
+    attempts: attempts ?? [],
+    customLists: customLists ?? [],
+  };
+}
+
+/**
+ * Fetch one page of report session summaries and only the attempts belonging
+ * to those sessions. This keeps the Sessions tab bounded as history grows.
+ */
+export async function getReportSessionsPageFromDB(
+  authToken: string,
+  userId: string,
+  fromDate: string | undefined,
+  page: number,
+  pageSize: number,
+) {
+  const userClient = getSupabaseUserClient(authToken);
+  const offset = (page - 1) * pageSize;
+  let sessionsQuery = userClient
+    .from("practice_sessions")
+    .select("*", { count: "exact" })
+    .eq("user_id", userId)
+    .order("session_started_at", { ascending: false })
+    .range(offset, offset + pageSize - 1);
+
+  if (fromDate) {
+    sessionsQuery = sessionsQuery.gte("session_started_at", fromDate);
+  }
+
+  const {
+    data: sessions,
+    error: sessionsError,
+    count,
+  } = await sessionsQuery;
+  if (sessionsError) throw sessionsError;
+
+  const sessionRows = sessions ?? [];
+  if (sessionRows.length === 0) {
+    return { sessions: [], attempts: [], total: count ?? 0 };
+  }
+
+  const { data: attempts, error: attemptsError } = await userClient
+    .from("word_attempts")
+    .select("*")
+    .eq("user_id", userId)
+    .in("session_id", sessionRows.map((session) => session.id))
+    .order("created_at", { ascending: false });
+
+  if (attemptsError) throw attemptsError;
+  return {
+    sessions: sessionRows,
+    attempts: attempts ?? [],
+    total: count ?? sessionRows.length,
+  };
+}
+
 export async function getPracticeSessionFromDB(
   authToken: string,
   userId: string,
@@ -671,16 +804,6 @@ export async function getPracticeSessionFromDB(
     .maybeSingle();
 
   if (error) {
-    if (error.code === "PGRST204" || error.message?.includes("custom_list_name")) {
-      const { data: fallbackData, error: fallbackError } = await userClient
-        .from("practice_sessions")
-        .select("id, mode, status, session_started_at, session_ended_at, origin_language, custom_list_id")
-        .eq("id", sessionId)
-        .eq("user_id", userId)
-        .maybeSingle();
-      if (fallbackError) throw fallbackError;
-      return fallbackData;
-    }
     throw error;
   }
   return data;

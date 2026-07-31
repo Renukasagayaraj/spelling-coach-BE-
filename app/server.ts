@@ -16,6 +16,8 @@ import {
   endPracticeSessionInDB,
   getUserStatisticsInDB,
   getSessionAttemptsFromDB,
+  getReportDataFromDB,
+  getReportSessionsPageFromDB,
   getPracticeSessionFromDB,
   getUserSubscriptionFromDB,
   updateUserSubscriptionInDB,
@@ -44,6 +46,11 @@ import {
 } from "./fileImportHandler.js";
 import { getConfiguredModelName } from "./modelConfig.js";
 import { isNewDeterministicPatternMatcherEnabled } from "./newPatternMatcher.js";
+import {
+  buildReportSection,
+  buildSessionWordDetails,
+  type ReportSection,
+} from "./reportBuilder.js";
 import { hasWordTeachingPrecompute, runSplitSpellingCoachAgent, warmWordTeachingPrecompute } from "./optimizedCoach.js";
 import { generatePronunciationAudio } from "./pronunciation.js";
 import { isNextStepEnabled, isRuntimeConceptTeachingEnabled } from "./prompt.js";
@@ -69,6 +76,7 @@ import {
   searchWords,
 } from "./wordCatalog.js";
 import { logError, logInfo } from "./logging.js";
+import { sendWeeklyEmailReports } from "./weeklyEmail.js";
 import {
   buildVoiceResponse,
   interpretVoiceUtterance,
@@ -128,6 +136,38 @@ async function getStandardWordsUsed(authToken: string, userId: string): Promise<
 
 function isStandardMode(mode: string): boolean {
   return mode === "standard" || mode.startsWith("standard_level_");
+}
+
+function reportRangeStart(range: string | null): string | undefined {
+  const daysByRange: Record<string, number> = { "7d": 7, "30d": 30, "90d": 90 };
+  const days = range ? daysByRange[range] : undefined;
+  if (!days) return undefined; // "all" (and omitted) means all available history.
+
+  const start = new Date();
+  start.setDate(start.getDate() - days);
+  return start.toISOString();
+}
+
+function reportFormatting(url: URL) {
+  const requestedLocale = url.searchParams.get("locale") || "en-US";
+  const requestedTimeZone = url.searchParams.get("timeZone") || "UTC";
+  let locale = "en-US";
+  let timeZone = "UTC";
+
+  try {
+    locale = new Intl.DateTimeFormat(requestedLocale).resolvedOptions().locale;
+  } catch {
+    // Keep the stable default for an invalid locale.
+  }
+  try {
+    timeZone = new Intl.DateTimeFormat("en-US", {
+      timeZone: requestedTimeZone,
+    }).resolvedOptions().timeZone;
+  } catch {
+    // Keep UTC for an invalid time-zone identifier.
+  }
+
+  return { locale, timeZone };
 }
 
 function sendUpgradeRequired(response: import("node:http").ServerResponse): void {
@@ -214,6 +254,14 @@ function isAuthError(error: unknown): boolean {
   );
 }
 
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (error && typeof error === "object" && "message" in error && typeof error.message === "string") {
+    return error.message;
+  }
+  return "Unexpected server error.";
+}
+
 export default async function handler(
   request: import("node:http").IncomingMessage,
   response: import("node:http").ServerResponse,
@@ -237,6 +285,17 @@ export default async function handler(
   });
 
   try {
+    if (request.method === "GET" && url.pathname === "/api/cron/weekly-report") {
+      const secret = process.env.CRON_SECRET;
+      if (!secret || request.headers.authorization !== `Bearer ${secret}`) {
+        sendJson(response, 401, { error: "Unauthorized." });
+        return;
+      }
+      const result = await sendWeeklyEmailReports();
+      sendJson(response, result.failures.length ? 207 : 200, result);
+      return;
+    }
+
     if (request.method === "GET" && url.pathname === "/api/health") {
       const runtime =
         process.env.SPELLING_COACH_RUNTIME === "direct"
@@ -570,6 +629,128 @@ export default async function handler(
       const authHeader = request.headers.authorization || "";
       const stats = await getUserStatisticsInDB(authHeader, user.id);
       sendJson(response, 200, { stats });
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/reports") {
+      const user = await authenticateRequest(request);
+      const authHeader = request.headers.authorization || "";
+      const range = url.searchParams.get("range") || "30d";
+      const section = (url.searchParams.get("section") || "overview") as ReportSection;
+      const sections: ReportSection[] = [
+        "overview",
+        "missAnalysis",
+        "wordKnowledge",
+        "supportUsage",
+        "sessions",
+        "mockBee",
+      ];
+
+      if (!["7d", "30d", "90d", "all"].includes(range)) {
+        sendJson(response, 400, { error: "range must be 7d, 30d, 90d, or all" });
+        return;
+      }
+      if (!sections.includes(section)) {
+        sendJson(response, 400, { error: `section must be one of: ${sections.join(", ")}` });
+        return;
+      }
+
+      const fromDate = reportRangeStart(range);
+      const requestedPage = Number.parseInt(url.searchParams.get("page") || "1", 10);
+      const requestedPageSize = Number.parseInt(url.searchParams.get("pageSize") || "10", 10);
+      const page = Number.isFinite(requestedPage) && requestedPage > 0 ? requestedPage : 1;
+      const pageSize = Number.isFinite(requestedPageSize)
+        ? Math.min(Math.max(requestedPageSize, 1), 50)
+        : 10;
+      const pagedReport = section === "sessions"
+        ? await getReportSessionsPageFromDB(
+          authHeader,
+          user.id,
+          fromDate,
+          page,
+          pageSize,
+        )
+        : null;
+      const report = pagedReport ?? await getReportDataFromDB(
+        authHeader,
+        user.id,
+        fromDate,
+        section === "wordKnowledge",
+      );
+      const sessionsById = new Map(report.sessions.map((session) => [session.id, session]));
+      const customListsById = new Map(
+        ("customLists" in report ? report.customLists : []).map((list) => [list.id, list]),
+      );
+      const attempts =
+        section === "wordKnowledge"
+          ? report.attempts.map((attempt) => {
+            const localWord = getWordByText(attempt.target_word);
+
+            let customWord;
+
+            if (!localWord) {
+              const session = sessionsById.get(attempt.session_id);
+              const customList = session?.custom_list_id
+                ? customListsById.get(session.custom_list_id)
+                : undefined;
+
+              customWord = Array.isArray(customList?.words)
+                ? customList.words.find(
+                  (word) =>
+                    word.word.toLowerCase() ===
+                    attempt.target_word.toLowerCase(),
+                )
+                : undefined;
+            }
+
+            const word = localWord ?? customWord;
+
+            return {
+              ...attempt,
+              word_catalog_entry: word
+                ? buildWordResponse(word)
+                : null,
+            };
+          })
+          : report.attempts;
+      const data = buildReportSection(
+        { sessions: report.sessions, attempts },
+        section,
+        reportFormatting(url),
+      );
+      sendJson(response, 200, pagedReport
+        ? {
+          ...data,
+          pagination: {
+            page,
+            pageSize,
+            total: pagedReport.total,
+            totalPages: Math.max(1, Math.ceil(pagedReport.total / pageSize)),
+          },
+        }
+        : data);
+      return;
+    }
+
+    if (
+      request.method === "GET"
+      && url.pathname === "/api/reports/session-details"
+    ) {
+      const user = await authenticateRequest(request);
+      const authHeader = request.headers.authorization || "";
+      const sessionId = url.searchParams.get("sessionId");
+      if (!sessionId) {
+        sendJson(response, 400, { error: "Missing sessionId query parameter" });
+        return;
+      }
+      const attempts = await getSessionAttemptsFromDB(
+        authHeader,
+        user.id,
+        sessionId,
+      );
+      sendJson(response, 200, {
+        words: buildSessionWordDetails(attempts),
+      });
       return;
     }
 
