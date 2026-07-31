@@ -1529,9 +1529,7 @@ export default async function handler(
       return;
     }
 
-    sendJson(response, 400, {
-      error: error instanceof Error ? error.message : String(error),
-    });
+    sendJson(response, 400, { error: errorMessage(error) });
   }
 }
 
