@@ -20,6 +20,7 @@ import type {
   SpellingCoachOutput,
   WordTeachingPrecompute,
 } from "./schemas.js";
+import { getFriendlyPronunciationCue } from "./friendlyPronunciation.js";
 import { logError, logInfo } from "./logging.js";
 
 export const SpellingCoachStreamRequestSchema = z
@@ -211,6 +212,21 @@ const SECTIONS: readonly SpellingCoachStreamSection[] = [
   "explanation",
   "memory_tip",
 ];
+
+function streamingSayAloudTip(
+  targetWord: string,
+  precomputed: WordTeachingPrecompute,
+): string {
+  const storedCue = getFriendlyPronunciationCue(targetWord);
+  if (storedCue) return storedCue;
+
+  const chunks = precomputed.wordBreakdown.displayChunks
+    .map((chunk) => chunk.trim())
+    .filter(Boolean);
+  if (chunks.length > 1) return `Say it slowly in chunks: ${chunks.join("-")}.`;
+  if (chunks.length === 1) return `Say it slowly: ${chunks[0]}.`;
+  return `Say it slowly: ${targetWord.trim()}.`;
+}
 
 function defaultSectionTimeoutMs(): number {
   const configured = Number(process.env.SPELLING_COACH_SECTION_TIMEOUT_MS);
@@ -850,7 +866,10 @@ export async function streamSpellingCoach(
       missAnalysis: deterministicMissAnalysis(coachInput),
     });
     writeSseEvent(flushableResponse, "precomputed", {
-      payload: precomputed,
+      payload: {
+        ...precomputed,
+        sayAloudTip: streamingSayAloudTip(coachInput.targetWord, precomputed),
+      },
       timingMs: precomputedMs,
     });
 
