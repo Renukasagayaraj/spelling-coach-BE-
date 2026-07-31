@@ -34,13 +34,29 @@ function reportUrl() {
   return `${(process.env.APP_BASE_URL || "").replace(/\/$/, "")}/reports`;
 }
 
-function emailHtml(name: string, summary: WeeklySummary, start: Date, end: Date) {
+function profileUrl() {
+  return `${(process.env.APP_BASE_URL || "").replace(/\/$/, "")}/profile`;
+}
+
+function escapeHtml(value: string) {
+  return value.replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  })[character] ?? character);
+}
+
+function recipientGreeting(recipient: EmailRecipient) {
+  const fullName = recipient.full_name?.trim();
+  if (fullName) return fullName;
+  return recipient.email.split("@")[0] || "there";
+}
+
+function emailHtml(recipient: EmailRecipient, summary: WeeklySummary, start: Date, end: Date) {
   const accuracy = summary.wordsPracticed
     ? Math.round((summary.correctAnswers / summary.wordsPracticed) * 100)
     : 0;
   const dates = `${start.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })}–${new Date(end.getTime() - 1).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })}`;
   return `<!doctype html><html><body style="font-family:Arial,sans-serif;color:#1e3a5f;line-height:1.5">
-    <h1>Weekly Spelling Scholar progress</h1><p>Hello ${name},</p>
+    <h1>Weekly Spelling Scholar progress</h1><p>Hello ${escapeHtml(recipientGreeting(recipient))},</p>
     <p>Here is the learning summary for ${dates}.</p>
     <table role="presentation" style="border-collapse:collapse"><tr>
       <td style="padding:12px 20px;background:#f3f7fb"><strong>${summary.sessions}</strong><br>sessions</td>
@@ -48,7 +64,7 @@ function emailHtml(name: string, summary: WeeklySummary, start: Date, end: Date)
       <td style="padding:12px 20px;background:#f3f7fb"><strong>${accuracy}%</strong><br>accuracy</td>
     </tr></table>
     <p><a href="${reportUrl()}" style="display:inline-block;padding:10px 16px;background:#1e3a5f;color:#fff;text-decoration:none;border-radius:6px">View full report</a></p>
-    <p style="font-size:12px;color:#667085">You receive this because weekly progress emails are enabled in your Spelling Scholar profile. You can turn them off there at any time.</p>
+    <p style="font-size:12px;color:#667085">You receive this because weekly progress emails are enabled in your Spelling Scholar profile. You can <a href="${profileUrl()}" style="color:#1e3a5f">turn them off in Profile</a> at any time.</p>
   </body></html>`;
 }
 
@@ -94,7 +110,7 @@ export async function sendWeeklyEmailReports(now = new Date()) {
       if (sessionsError) throw sessionsError;
       const wordsPracticed = attempts?.length ?? 0;
       if (!wordsPracticed) { await db.from("weekly_email_sends").delete().eq("user_id", recipient.id).eq("week_start", weekStart); skipped++; continue; }
-      await sendWithResend(recipient.email, emailHtml(recipient.full_name || "there", {
+      await sendWithResend(recipient.email, emailHtml(recipient, {
         sessions: sessions ?? 0, wordsPracticed, correctAnswers: attempts?.filter((attempt) => attempt.is_correct).length ?? 0,
       }, start, end));
       const { error: updateError } = await db.from("weekly_email_sends")
