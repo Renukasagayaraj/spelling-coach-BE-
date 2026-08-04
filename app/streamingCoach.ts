@@ -177,6 +177,7 @@ export async function readSpellingCoachStreamRequest(
 }
 
 export type SpellingCoachStreamSection =
+  | "short_feedback"
   | "miss_analysis"
   | "explanation"
   | "memory_tip";
@@ -208,6 +209,7 @@ type FlushableResponse = ServerResponse & { flush?: () => void };
 type SectionError = Error & { code: string };
 
 const SECTIONS: readonly SpellingCoachStreamSection[] = [
+  "short_feedback",
   "miss_analysis",
   "explanation",
   "memory_tip",
@@ -487,6 +489,7 @@ type ParserEvent =
     };
 
 const MARKERS: Record<string, SpellingCoachStreamSection | "end"> = {
+  "[[SHORT_FEEDBACK]]": "short_feedback",
   "[[MISS_ANALYSIS]]": "miss_analysis",
   "[[EXPLANATION]]": "explanation",
   "[[MEMORY_TIP]]": "memory_tip",
@@ -494,6 +497,7 @@ const MARKERS: Record<string, SpellingCoachStreamSection | "end"> = {
 };
 
 const SECTION_MARKER_BY_SECTION: Record<SpellingCoachStreamSection, string> = {
+  short_feedback: "[[SHORT_FEEDBACK]]",
   miss_analysis: "[[MISS_ANALYSIS]]",
   explanation: "[[EXPLANATION]]",
   memory_tip: "[[MEMORY_TIP]]",
@@ -738,6 +742,7 @@ async function* runtimeOutputToMarkedText(
       );
     }),
   ]);
+  yield `[[SHORT_FEEDBACK]]${output.coachingText.shortFeedback}[[END_SECTION]]`;
   yield `[[MISS_ANALYSIS]]${output.missAnalysis.summary}[[END_SECTION]]`;
   yield `[[EXPLANATION]]${output.coachingText.fullExplanation}[[END_SECTION]]`;
   yield `[[MEMORY_TIP]]${output.coachingText.memoryTip}[[END_SECTION]]`;
@@ -875,7 +880,7 @@ export async function streamSpellingCoach(
 
     let runtimeCoachingMs = 0;
 
-    if (!coachInput.missSignals.isCorrect && connected) {
+    if (connected) {
       const runtimeStart = now();
       const parser = new RuntimeSectionParser();
       const sectionStarts = new Map<SpellingCoachStreamSection, number>();

@@ -532,6 +532,7 @@ export function buildSpellingCoachPrompt(input: SpellingCoachInput): string {
 }
 
 export const STREAMING_RUNTIME_MARKERS = [
+  "[[SHORT_FEEDBACK]]",
   "[[MISS_ANALYSIS]]",
   "[[EXPLANATION]]",
   "[[MEMORY_TIP]]",
@@ -541,7 +542,8 @@ export const STREAMING_RUNTIME_END_MARKER = "[[END_SECTION]]";
 
 export const SPELLING_COACH_STREAMING_RUNTIME_SYSTEM_PROMPT = `You are an expert spelling coach for children.
 
-Output only the three required sections, in this exact order:
+Output only the four required sections, in this exact order:
+[[SHORT_FEEDBACK]]
 [[MISS_ANALYSIS]]
 [[EXPLANATION]]
 [[MEMORY_TIP]]
@@ -569,7 +571,13 @@ export function buildStreamingRuntimePrompt(
     "Do not output JSON.",
     "Do not output markdown.",
     "Do not output any text before the first marker.",
-    "Do not output any section other than these three sections.",
+    "Do not output any section other than these four sections.",
+    "Keep the SHORT_FEEDBACK section to one warm, child-friendly sentence of at most 22 words.",
+    "Make SHORT_FEEDBACK specific to the child's actual attempt.",
+    "Name the exact missing, extra, substituted, or transposed letter or chunk when the evidence provides it.",
+    "Briefly acknowledge a correct part only when the evidence supports that claim.",
+    "Avoid vague feedback such as 'most of the word is correct' or 'focus on the ending'.",
+    "Do not invent spelling or sound details that are not supported by the input.",
     "Keep the MISS_ANALYSIS section focused on what happened in the child's spelling attempt.",
     "Keep the EXPLANATION section focused on the correction path and the most useful spelling idea.",
     ...getMemoryTipPromptGuidance(input.targetWord).map((line) =>
@@ -783,6 +791,12 @@ export function buildMissOnlyPrompt(
     "Analyze the child's spelling attempt and return one JSON object that contains only miss-dependent fields.",
     "Do not regenerate wordTeaching, wordBreakdown, or conceptLabels. Those word-level teaching fields are already provided and should be treated as fixed context.",
     "Use the precomputed word-level teaching as support, then focus on correctness, miss analysis, error relevance, teaching decision, coaching text, and next step.",
+    "Keep coachingText.shortFeedback to one warm, child-friendly sentence of at most 22 words.",
+    "Make coachingText.shortFeedback specific to the child's actual attempt.",
+    "Name the exact missing, extra, substituted, or transposed letter or chunk when the evidence provides it.",
+    "Briefly acknowledge a correct part only when the evidence supports that claim.",
+    "Avoid vague feedback such as 'most of the word is correct' or 'focus on the ending'.",
+    "Do not invent spelling or sound details that are not supported by the input.",
     "Follow the schema exactly as already specified in the system instructions.",
     "Use the exact top-level keys and nested field names. Do not rename sections.",
     "Choose missAnalysis.primaryErrorType and missAnalysis.secondaryErrorTypes only from the allowed controlled error type list below.",

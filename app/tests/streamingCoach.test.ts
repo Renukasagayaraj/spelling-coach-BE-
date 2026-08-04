@@ -253,7 +253,7 @@ test("stream request reader validates JSON and enforces its body limit", async (
   assert.equal(stalledRequest.listenerCount("close"), 0);
 });
 
-test("correct spelling streams meta, precomputed, and done without runtime", async () => {
+test("correct spelling streams a short praise message", async () => {
   const response = new FakeResponse();
   let runtimeCalls = 0;
   const logLines: string[] = [];
@@ -271,7 +271,23 @@ test("correct spelling streams meta, precomputed, and done without runtime", asy
         precompute: async () => precomputed,
         runRuntime: async () => {
           runtimeCalls += 1;
-          return runtimeOutput;
+          return {
+            ...runtimeOutput,
+            correctness: { isCorrect: true, reinforceSuccess: true },
+            missAnalysis: {
+              ...runtimeOutput.missAnalysis,
+              summary: "",
+              primaryErrorType: null,
+              secondaryErrorTypes: [],
+              primaryErrorFocus: "",
+            },
+            coachingText: {
+              ...runtimeOutput.coachingText,
+              shortFeedback: "Excellent spelling!",
+              fullExplanation: "",
+              memoryTip: "",
+            },
+          };
         },
         requestId: () => "request-correct",
       },
@@ -281,11 +297,16 @@ test("correct spelling streams meta, precomputed, and done without runtime", asy
   }
 
   const events = parseEvents(response);
-  assert.deepEqual(events.map(({ event }) => event), [
-    "meta",
-    "precomputed",
-    "done",
-  ]);
+  assert.equal(events[0].event, "meta");
+  assert.equal(events[1].event, "precomputed");
+  assert.equal(events.at(-1)?.event, "done");
+  assert.equal(
+    events.find(
+      ({ event, data }) =>
+        event === "section-chunk" && data.section === "short_feedback",
+    )?.data.text,
+    "Excellent spelling!",
+  );
   assert.equal(events[0].data.isCorrect, true);
   assert.equal(
     logLines.some((line) =>
@@ -305,18 +326,21 @@ test("correct spelling streams meta, precomputed, and done without runtime", asy
   ]);
   assert.equal(events[0].data.missAnalysis.primaryErrorType, null);
   assert.deepEqual(events[0].data.missAnalysis.secondaryErrorTypes, []);
-  assert.deepEqual(events[1].data.payload, precomputed);
+  assert.deepEqual(events[1].data.payload.wordTeaching, precomputed.wordTeaching);
+  assert.deepEqual(events[1].data.payload.wordBreakdown, precomputed.wordBreakdown);
+  assert.equal(typeof events[1].data.payload.sayAloudTip, "string");
   assert.deepEqual(Object.keys(events[1].data).sort(), ["payload", "timingMs"]);
-  assert.equal(events[2].data.timings.runtimeCoachingMs, 0);
-  assert.deepEqual(Object.keys(events[2].data).sort(), ["complete", "timings"]);
-  assert.deepEqual(Object.keys(events[2].data.timings).sort(), [
+  const done = events.at(-1)!;
+  assert.equal(done.data.timings.runtimeCoachingMs >= 0, true);
+  assert.deepEqual(Object.keys(done.data).sort(), ["complete", "timings"]);
+  assert.deepEqual(Object.keys(done.data.timings).sort(), [
     "metaMs",
     "precomputedMs",
     "runtimeCoachingMs",
     "runtimeMs",
     "totalMs",
   ]);
-  assert.equal(runtimeCalls, 0);
+  assert.equal(runtimeCalls, 1);
   assert.equal(response.headers["Content-Type"], "text/event-stream");
   assert.equal(response.headers["X-Accel-Buffering"], "no");
   assert.equal(response.flushCount, events.length);
