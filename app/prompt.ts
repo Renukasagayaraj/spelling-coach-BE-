@@ -23,23 +23,18 @@ function getMemoryTipPromptGuidance(targetWord: string): string[] {
 
   if (level === "3") {
     return [
-      "For Level 3 words, always provide coachingText.memoryTip even if the child spelled the word correctly.",
-      "coachingText.memoryTip may be up to two short lines when that genuinely helps recall.",
+      "For Level 3 words, coachingText.memoryTip may be up to two short lines when that genuinely helps recall.",
       "Keep coachingText.memoryTip focused on memory support rather than turning it into another explanation.",
     ];
   }
 
   if (level === "2") {
     return [
-      "For Level 2 words, always provide coachingText.memoryTip even if the child spelled the word correctly.",
-      "Keep coachingText.memoryTip brief: one short intuitive cue.",
+      "For Level 2 words, keep coachingText.memoryTip brief: one short intuitive cue.",
     ];
   }
 
-  return [
-    "Always provide coachingText.memoryTip even if the child spelled the word correctly.",
-    "Keep coachingText.memoryTip brief and focused on recall."
-  ];
+  return ["Keep coachingText.memoryTip brief and focused on recall."];
 }
 
 function buildAllowedErrorTypesText(): string {
@@ -537,7 +532,6 @@ export function buildSpellingCoachPrompt(input: SpellingCoachInput): string {
 }
 
 export const STREAMING_RUNTIME_MARKERS = [
-  "[[SHORT_FEEDBACK]]",
   "[[MISS_ANALYSIS]]",
   "[[EXPLANATION]]",
   "[[MEMORY_TIP]]",
@@ -547,8 +541,7 @@ export const STREAMING_RUNTIME_END_MARKER = "[[END_SECTION]]";
 
 export const SPELLING_COACH_STREAMING_RUNTIME_SYSTEM_PROMPT = `You are an expert spelling coach for children.
 
-Output only the four required sections, in this exact order:
-[[SHORT_FEEDBACK]]
+Output only the three required sections, in this exact order:
 [[MISS_ANALYSIS]]
 [[EXPLANATION]]
 [[MEMORY_TIP]]
@@ -561,17 +554,12 @@ Rules:
 - output no markdown
 - output no extra commentary
 - output sections only
-- keep required ordering
-- [[MEMORY_TIP]] is always required — output it even when the child spelled the word correctly
-- when the child spelled the word correctly, [[MISS_ANALYSIS]] and [[EXPLANATION]] may be left empty (just the opening marker followed by [[END_SECTION]]), but [[MEMORY_TIP]] must always have content`;
+- keep required ordering`;
 
 export function buildStreamingRuntimePrompt(
   input: SpellingCoachInput,
   precomputed: string,
 ): string {
-  const isCorrect = input.missSignals?.isCorrect ?? false;
-  const level = Number(input.level);
-  const correctHigherLevel = isCorrect && level >= 2;
   return [
     "Write only runtime coaching prose for this spelling attempt.",
     "Use exactly these required section markers in order:",
@@ -581,28 +569,12 @@ export function buildStreamingRuntimePrompt(
     "Do not output JSON.",
     "Do not output markdown.",
     "Do not output any text before the first marker.",
-    "Do not output any section other than these four sections.",
-    // Verbatim from production prompt (prompt.ts buildLevelOneCoachingPrompt / buildCoachingPrompt):
-    "The SHORT_FEEDBACK section should be a short praise sentence if correct, or a gentle correction sentence if incorrect.",
-    "If the child miss is very minor, acknowledge that it was close in the SHORT_FEEDBACK section.",
+    "Do not output any section other than these three sections.",
     "Keep the MISS_ANALYSIS section focused on what happened in the child's spelling attempt.",
-    "In user-facing miss analysis text, prefer neutral wording such as 'the spelling', 'the attempt', or 'the word was spelled as'.",
-    "Keep the EXPLANATION section focused on the correction path, chunking, pattern, structure, letter choice, or similar-word comparison.",
-    "Keep explanations concise, specific, and actionable.",
-    "Use child-friendly language, but do not sound babyish.",
-    "Keep miss analysis readable for both children and adult learners.",
-    "If a useful similar-word comparison is available, prefer it over repeating concept teaching.",
-    ...(correctHigherLevel
-      ? [
-          "The child spelled the word correctly. You MUST still output the [[MEMORY_TIP]] section with a helpful memory cue for this word.",
-          "Do NOT leave the [[MEMORY_TIP]] section empty. It is required.",
-          "You may leave [[MISS_ANALYSIS]] and [[EXPLANATION]] empty (marker then [[END_SECTION]]) since the spelling was correct.",
-        ]
-      : []),
+    "Keep the EXPLANATION section focused on the correction path and the most useful spelling idea.",
     ...getMemoryTipPromptGuidance(input.targetWord).map((line) =>
       line.replace(/coachingText\.memoryTip/g, "the MEMORY_TIP section"),
     ),
-    "Do not repeat meaning, origin, or morphology details in the MEMORY_TIP section.",
     "Use this deterministic miss and word context. Do not change correctness.",
     "Precomputed teaching JSON:",
     precomputed,

@@ -43,7 +43,6 @@ import {
   buildMissOnlyPrompt,
   buildRelatedFormsOnlyPrecomputePrompt,
   buildSpellingCoachPrompt,
-  buildStreamingRuntimePrompt,
   buildWordTeachingPrecomputePrompt,
   SPELLING_COACH_SYSTEM_PROMPT,
 } from "./prompt.js";
@@ -1469,7 +1468,7 @@ test("uses short memory tip guidance for Level 2 runtime prompts", () => {
 
   assert.equal(
     prompt.includes(
-      "For Level 2 words, always provide coachingText.memoryTip even if the child spelled the word correctly.",
+      "For Level 2 words, keep coachingText.memoryTip brief: one short intuitive cue.",
     ),
     true,
   );
@@ -1555,7 +1554,7 @@ test("allows a longer memory tip for Level 3 miss-only prompts", () => {
 
   assert.equal(
     missOnlyPrompt.includes(
-      "coachingText.memoryTip may be up to two short lines when that genuinely helps recall.",
+      "For Level 3 words, coachingText.memoryTip may be up to two short lines when that genuinely helps recall.",
     ),
     true,
   );
@@ -1587,108 +1586,6 @@ test("allows a longer memory tip for Level 3 miss-only prompts", () => {
   assert.equal(
     missOnlyPrompt.includes("\"substantialStructuralOverlap\""),
     true,
-  );
-});
-
-test("streaming runtime prompt includes mandatory memory tip instruction for correct Level 2 words", () => {
-  const input: SpellingCoachInput = {
-    targetWord: "toreador",
-    childAttempt: "toreador",
-    childProfile: {
-      childId: "c-correct",
-      age: 11,
-      grade: "5",
-      spellingLevel: "on-grade",
-    },
-    wordMetadata: {
-      definition: "A bullfighter who fights on foot.",
-      partOfSpeech: "noun",
-    },
-    missSignals: {
-      isCorrect: true,
-      nearMiss: false,
-      missingLetters: [],
-      extraLetters: [],
-      substitutedLetters: [],
-      transposedLetters: [],
-      repeatedLetterIssue: false,
-      likelyRushed: false,
-      editDistance: 0,
-    },
-    structuralHints: {
-      syllables: ["to", "rea", "dor"],
-      likelyChunks: ["to", "rea", "dor"],
-      detectedPatterns: [],
-    },
-    sessionContext: {
-      mode: "practice",
-      previousAttemptsOnThisWord: 0,
-      previousMissPatterns: [],
-      recentlyPracticedWords: [],
-    },
-    level: 2,
-  };
-
-  const prompt = buildStreamingRuntimePrompt(input, "{}");
-
-  assert.equal(
-    prompt.includes(
-      "The child spelled the word correctly. You MUST still output the [[MEMORY_TIP]] section with a helpful memory cue for this word.",
-    ),
-    true,
-  );
-  assert.equal(
-    prompt.includes("Do NOT leave the [[MEMORY_TIP]] section empty. It is required."),
-    true,
-  );
-});
-
-test("streaming runtime prompt does NOT add mandatory memory tip instruction for correct Level 1 words", () => {
-  const input: SpellingCoachInput = {
-    targetWord: "cat",
-    childAttempt: "cat",
-    childProfile: {
-      childId: "c-l1",
-      age: 6,
-      grade: "1",
-      spellingLevel: "on-grade",
-    },
-    wordMetadata: {
-      definition: "A small domesticated animal.",
-      partOfSpeech: "noun",
-    },
-    missSignals: {
-      isCorrect: true,
-      nearMiss: false,
-      missingLetters: [],
-      extraLetters: [],
-      substitutedLetters: [],
-      transposedLetters: [],
-      repeatedLetterIssue: false,
-      likelyRushed: false,
-      editDistance: 0,
-    },
-    structuralHints: {
-      syllables: ["cat"],
-      likelyChunks: ["cat"],
-      detectedPatterns: [],
-    },
-    sessionContext: {
-      mode: "practice",
-      previousAttemptsOnThisWord: 0,
-      previousMissPatterns: [],
-      recentlyPracticedWords: [],
-    },
-    level: 1,
-  };
-
-  const prompt = buildStreamingRuntimePrompt(input, "{}");
-
-  assert.equal(
-    prompt.includes(
-      "The child spelled the word correctly. You MUST still output the [[MEMORY_TIP]] section with a helpful memory cue for this word.",
-    ),
-    false,
   );
 });
 

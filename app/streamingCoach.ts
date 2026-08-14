@@ -21,14 +21,10 @@ import type {
   WordTeachingPrecompute,
 } from "./schemas.js";
 import { logError, logInfo } from "./logging.js";
-import { getFriendlyPronunciationCue } from "./friendlyPronunciation.js";
+
 export const SpellingCoachStreamRequestSchema = z
   .object({
-    // Either targetWord (legacy) or challengeId+sessionId must be provided.
-    // server.ts resolves challengeId to targetWord before this schema is used
-    // for the actual coaching request.
-    targetWord: z.string().min(1).optional(),
-    challengeId: z.string().min(1).optional(),
+    targetWord: z.string().min(1),
     childAttempt: z.string(),
     level: z.number().finite().optional(),
     mode: z.string().min(1),
@@ -180,7 +176,6 @@ export async function readSpellingCoachStreamRequest(
 }
 
 export type SpellingCoachStreamSection =
-  | "short_feedback"
   | "miss_analysis"
   | "explanation"
   | "memory_tip";
@@ -212,7 +207,6 @@ type FlushableResponse = ServerResponse & { flush?: () => void };
 type SectionError = Error & { code: string };
 
 const SECTIONS: readonly SpellingCoachStreamSection[] = [
-  "short_feedback",
   "miss_analysis",
   "explanation",
   "memory_tip",
@@ -258,9 +252,6 @@ function withPrecomputeTimeout<T>(
 function buildLegacyCoachingRequest(
   request: SpellingCoachStreamRequest,
 ): CoachingRequest {
-  if (!request.targetWord) {
-    throw new Error("targetWord must be resolved before building coaching request.");
-  }
   return {
     targetWord: request.targetWord,
     childAttempt: request.childAttempt,
@@ -480,7 +471,6 @@ type ParserEvent =
     };
 
 const MARKERS: Record<string, SpellingCoachStreamSection | "end"> = {
-  "[[SHORT_FEEDBACK]]": "short_feedback",
   "[[MISS_ANALYSIS]]": "miss_analysis",
   "[[EXPLANATION]]": "explanation",
   "[[MEMORY_TIP]]": "memory_tip",
@@ -488,7 +478,6 @@ const MARKERS: Record<string, SpellingCoachStreamSection | "end"> = {
 };
 
 const SECTION_MARKER_BY_SECTION: Record<SpellingCoachStreamSection, string> = {
-  short_feedback: "[[SHORT_FEEDBACK]]",
   miss_analysis: "[[MISS_ANALYSIS]]",
   explanation: "[[EXPLANATION]]",
   memory_tip: "[[MEMORY_TIP]]",
@@ -733,7 +722,6 @@ async function* runtimeOutputToMarkedText(
       );
     }),
   ]);
-  yield `[[SHORT_FEEDBACK]]${output.coachingText.shortFeedback}[[END_SECTION]]`;
   yield `[[MISS_ANALYSIS]]${output.missAnalysis.summary}[[END_SECTION]]`;
   yield `[[EXPLANATION]]${output.coachingText.fullExplanation}[[END_SECTION]]`;
   yield `[[MEMORY_TIP]]${output.coachingText.memoryTip}[[END_SECTION]]`;
@@ -809,18 +797,37 @@ export async function streamSpellingCoach(
     }
 
     const precomputeStart = now();
-    const precomputeTimeoutMs = dependencies.precomputeTimeoutMs ?? defaultPrecomputeTimeoutMs();
+    const precomputeTimeoutMs =
+      dependencies.precomputeTimeoutMs ?? defaultPrecomputeTimeoutMs();
     let precomputed: WordTeachingPrecompute;
-    
-    // 1. Start the precompute database lookup (but do not await it yet)
-    const precompute =
-      dependencies.precompute ??
-      ((input: SpellingCoachInput, signal: AbortSignal) =>
-        warmWordTeachingPrecompute(input, { signal, requestId }));
-        
-    const precomputePromise = precompute(coachInput, precomputeAbortController.signal);
+    try {
+      const precompute =
+        dependencies.precompute ??
+        ((input: SpellingCoachInput, signal: AbortSignal) =>
+          warmWordTeachingPrecompute(input, { signal, requestId }));
+      precomputed = await withPrecomputeTimeout(
+        precompute(coachInput, precomputeAbortController.signal),
+        precomputeTimeoutMs,
+        () =>
+          precomputeAbortController.abort(
+            new Error("Spelling coach precompute timed out."),
+          ),
+      );
+    } catch (error) {
+      if (!connected) return;
+      logError(
+        `[spelling-coach stream] requestId=${requestId} precompute failed before SSE started`,
+        error,
+      );
+      throw error;
+    }
+    const precomputedMs = now() - precomputeStart;
+    logInfo(
+      `[spelling-coach precompute timing] requestId=${requestId} word="${coachInput.targetWord}" total=${precomputedMs.toFixed(1)}ms`,
+    );
 
-    // 2. Instantly flush headers and send the meta event
+    if (!connected) return;
+
     response.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache, no-transform",
@@ -829,71 +836,27 @@ export async function streamSpellingCoach(
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
       "Access-Control-Allow-Headers":
-        "Content-Type, Authorization, x-audio-filename",
+        "Content-Type, Authorization, x-audio-filename, x-guest-token",
     });
     response.flushHeaders();
     response.socket?.setNoDelay(true);
 
     const flushableResponse = response as FlushableResponse;
-    const isCorrect = coachInput.missSignals.isCorrect;
-    const shortFeedback = isCorrect 
-      ? `Correct. You spelled '${coachInput.targetWord}' exactly right.`
-      : undefined;
-
     writeSseEvent(flushableResponse, "meta", {
       requestId,
-      isCorrect,
+      isCorrect: coachInput.missSignals.isCorrect,
       timingMs: metaMs,
       targetWordMasked: true,
-      targetWord: parsedRequest.targetWord,
-      sayAloudTip: parsedRequest.targetWord ? getFriendlyPronunciationCue(parsedRequest.targetWord) ?? undefined : undefined,
       missAnalysis: deterministicMissAnalysis(coachInput),
-      shortFeedback,
     });
-
-    // 3. Now safely await the precompute before triggering the LLM
-    try {
-      precomputed = await withPrecomputeTimeout(
-        precomputePromise,
-        precomputeTimeoutMs,
-        () =>
-          precomputeAbortController.abort(
-            new Error("Spelling coach precompute timed out."),
-          ),
-      );
-    } catch (error) {
-      logError(
-        `[spelling-coach stream] requestId=${requestId} precompute failed after SSE started`,
-        error,
-      );
-      // Throwing here will abort the stream (since headers are flushed, it drops the connection).
-      // This preserves the original strict failure behavior.
-      throw error;
-    }
-
-    const precomputedMs = now() - precomputeStart;
-    logInfo(
-      `[spelling-coach precompute timing] requestId=${requestId} word="${coachInput.targetWord}" total=${precomputedMs.toFixed(1)}ms`,
-    );
-
     writeSseEvent(flushableResponse, "precomputed", {
       payload: precomputed,
       timingMs: precomputedMs,
     });
 
-    if (isCorrect && coachInput.level === 1) {
-      writeSseEvent(flushableResponse, "done", {
-        requestId,
-        targetWord: coachInput.targetWord,
-      });
-      response.end();
-      return;
-    }
-
-
     let runtimeCoachingMs = 0;
 
-    if ((!coachInput.missSignals.isCorrect || (coachInput.level ?? 0) >= 2) && connected) {
+    if (!coachInput.missSignals.isCorrect && connected) {
       const runtimeStart = now();
       const parser = new RuntimeSectionParser();
       const sectionStarts = new Map<SpellingCoachStreamSection, number>();
@@ -1071,7 +1034,6 @@ export async function streamSpellingCoach(
     if (connected) {
       writeSseEvent(flushableResponse, "done", {
         complete: true,
-        targetWord: parsedRequest.targetWord,
         timings: {
           metaMs,
           precomputedMs,

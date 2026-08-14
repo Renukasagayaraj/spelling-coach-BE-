@@ -13,26 +13,9 @@ if (!supabaseUrl || !supabaseKey) {
   throw new Error("Supabase is not configured. Set SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY.");
 }
 
-const customFetch = async (url: RequestInfo | URL, options?: RequestInit): Promise<Response> => {
-  let retries = 3;
-  while (retries > 0) {
-    try {
-      return await fetch(url, options);
-    } catch (e: any) {
-      retries--;
-      if (retries === 0) throw e;
-      await new Promise(r => setTimeout(r, 1000));
-    }
-  }
-  throw new Error("Fetch failed");
-};
-
 export const supabase = createClient(supabaseUrl, supabaseKey, {
   auth: {
     persistSession: false,
-  },
-  global: {
-    fetch: customFetch,
   },
 });
 
@@ -47,7 +30,6 @@ export function getSupabaseUserClient(authToken: string) {
       persistSession: false,
     },
     global: {
-      fetch: customFetch,
       headers: {
         Authorization: `Bearer ${cleanToken}`,
       },
@@ -260,6 +242,7 @@ export interface UserProfile {
   age: number | null;
   grade: string | null;
   spelling_level: string | null;
+  weekly_email_enabled: boolean;
 }
 
 /**
@@ -269,7 +252,7 @@ export async function fetchUserProfileFromDB(authToken: string, userId: string, 
   const userClient = getSupabaseUserClient(authToken);
   const { data, error } = await userClient
     .from("users")
-    .select("id, email, full_name, theme_preference, audio_enabled, child_id, age, grade, spelling_level")
+    .select("id, email, full_name, theme_preference, audio_enabled, child_id, age, grade, spelling_level, weekly_email_enabled")
     .eq("id", userId)
     .maybeSingle();
 
@@ -288,9 +271,9 @@ export async function fetchUserProfileFromDB(authToken: string, userId: string, 
         child_id: "c1",
         age: 10,
         grade: "5",
-        spelling_level: "competition",
+        spelling_level: "competition", weekly_email_enabled: false,
       })
-      .select("id, email, full_name, theme_preference, audio_enabled, child_id, age, grade, spelling_level")
+      .select("id, email, full_name, theme_preference, audio_enabled, child_id, age, grade, spelling_level, weekly_email_enabled")
       .maybeSingle();
 
     if (insertError) {
@@ -315,7 +298,7 @@ export async function updateUserProfileInDB(
     .from("users")
     .update(updates)
     .eq("id", userId)
-    .select("id, email, full_name, theme_preference, audio_enabled, child_id, age, grade, spelling_level")
+    .select("id, email, full_name, theme_preference, audio_enabled, child_id, age, grade, spelling_level, weekly_email_enabled")
     .single();
 
   if (error) {
@@ -479,140 +462,6 @@ export async function startPracticeSessionInDB(
   };
 }
 
-/**
- * Stores a challengeId -> targetWord mapping inside the session's session_state JSONB.
- * Merges safely into any existing session_state without overwriting other keys.
- */
-export async function addChallengeToSession(
-  authToken: string,
-  userId: string,
-  sessionId: string,
-  challengeId: string,
-  targetWord: string,
-): Promise<void> {
-  const userClient = getSupabaseUserClient(authToken);
-
-  // Read the current session_state first so we can merge without overwriting
-  const { data, error: fetchError } = await userClient
-    .from("practice_sessions")
-    .select("session_state")
-    .eq("id", sessionId)
-    .eq("user_id", userId)
-    .single();
-
-  if (fetchError) throw fetchError;
-
-  const current = (data?.session_state as Record<string, unknown>) ?? {};
-  const activeChallenges = ((current.activeChallenges ?? {}) as Record<string, string>);
-
-  const { error: updateError } = await userClient
-    .from("practice_sessions")
-    .update({
-      session_state: {
-        ...current,
-        activeChallenges: {
-          ...activeChallenges,
-          [challengeId]: targetWord,
-        },
-      },
-    })
-    .eq("id", sessionId)
-    .eq("user_id", userId);
-
-  if (updateError) throw updateError;
-}
-
-/**
- * Read-only lookup of a challengeId in the session — does NOT consume/remove the entry.
- * Used by the pronunciation route so the challenge remains available for the stream route.
- * Returns null if the challenge is not found.
- */
-export async function peekChallengeInSession(
-  authToken: string,
-  userId: string,
-  sessionId: string,
-  challengeId: string,
-): Promise<string | null> {
-  const userClient = getSupabaseUserClient(authToken);
-
-  const { data, error } = await userClient
-    .from("practice_sessions")
-    .select("session_state")
-    .eq("id", sessionId)
-    .eq("user_id", userId)
-    .single();
-
-  if (error || !data) return null;
-
-  const state = (data.session_state as Record<string, unknown>) ?? {};
-  const activeChallenges = (state.activeChallenges ?? {}) as Record<string, string>;
-  const completedChallenges = (state.completedChallenges ?? {}) as Record<string, string>;
-  
-  return activeChallenges[challengeId] ?? completedChallenges[challengeId] ?? null;
-}
-
-/**
- * Resolves a challengeId to the target word and removes it from the session in one operation
- * (consume-once pattern). Returns null if the challenge is not found.
- * This prevents entry accumulation and eliminates replay attacks.
- */
-export async function getChallengeFromSession(
-  authToken: string,
-  userId: string,
-  sessionId: string,
-  challengeId: string,
-): Promise<string | null> {
-  const userClient = getSupabaseUserClient(authToken);
-
-  const { data, error } = await userClient
-    .from("practice_sessions")
-    .select("session_state")
-    .eq("id", sessionId)
-    .eq("user_id", userId)
-    .single();
-
-  if (error || !data) return null;
-
-  const state = (data.session_state as Record<string, unknown>) ?? {};
-  const activeChallenges = { ...(state.activeChallenges ?? {}) } as Record<string, string>;
-  const completedChallenges = { ...(state.completedChallenges ?? {}) } as Record<string, string>;
-  
-  let targetWord = activeChallenges[challengeId];
-  let wasAlreadyCompleted = false;
-
-  if (!targetWord) {
-    targetWord = completedChallenges[challengeId];
-    if (targetWord) {
-      wasAlreadyCompleted = true;
-    } else {
-      return null;
-    }
-  }
-
-  if (wasAlreadyCompleted) {
-    return targetWord;
-  }
-
-  // Move the consumed challenge to completedChallenges to prevent replay on attempts
-  // but still allow peeking for pronunciation audio and retrying.
-  delete activeChallenges[challengeId];
-  completedChallenges[challengeId] = targetWord;
-  
-  await userClient
-    .from("practice_sessions")
-    .update({
-      session_state: {
-        ...state,
-        activeChallenges,
-        completedChallenges,
-      },
-    })
-    .eq("id", sessionId)
-    .eq("user_id", userId);
-
-  return targetWord;
-}
-
 export async function recordWordAttemptInDB(
   authToken: string,
   userId: string,
@@ -632,6 +481,7 @@ export async function recordWordAttemptInDB(
 ) {
   const userClient = getSupabaseUserClient(authToken);
   const scope = resolvePracticeScope(mode, level);
+  const normalizedCoachingResponse = normalizeCoachingResponseForStorage(coachingResponse);
   const { data, error } = await userClient
     .from("word_attempts")
     .insert({
@@ -647,7 +497,7 @@ export async function recordWordAttemptInDB(
       part_of_speech_viewed: partOfSpeechViewed,
       repeat_word_count: repeatWordCount || 0,
       used_voice_input: usedVoiceInput,
-      coaching_response: coachingResponse,
+      coaching_response: normalizedCoachingResponse,
     })
     .select("id")
     .single();
@@ -738,6 +588,43 @@ export async function recordWordAttemptInDB(
   return data.id as string;
 }
 
+export async function updateWordAttemptCoachingResponseInDB(
+  authToken: string,
+  userId: string,
+  attemptId: string,
+  coachingResponse: string,
+) {
+  const userClient = getSupabaseUserClient(authToken);
+  const normalizedCoachingResponse = normalizeCoachingResponseForStorage(coachingResponse);
+
+  const { error } = await userClient
+    .from("word_attempts")
+    .update({
+      coaching_response: normalizedCoachingResponse,
+    })
+    .eq("id", attemptId)
+    .eq("user_id", userId);
+
+  if (error) throw error;
+}
+
+function normalizeCoachingResponseForStorage(
+  coachingResponse?: string,
+): Record<string, unknown> | null {
+  if (!coachingResponse) {
+    return null;
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(coachingResponse);
+    return parsed && typeof parsed === "object"
+      ? (parsed as Record<string, unknown>)
+      : { legacyText: coachingResponse };
+  } catch {
+    return { legacyText: coachingResponse };
+  }
+}
+
 /**
  * End a practice session in the DB.
  */
@@ -807,6 +694,113 @@ export async function getSessionAttemptsFromDB(
     throw error;
   }
   return data;
+}
+
+/**
+ * Fetch the source data used by the reports dashboard.  Both queries are
+ * scoped to the authenticated user so the report can never include another
+ * user's practice history.
+ */
+export async function getReportDataFromDB(
+  authToken: string,
+  userId: string,
+  fromDate: string | undefined,
+  includeCustomLists: boolean,
+) {
+  const userClient = getSupabaseUserClient(authToken);
+
+  let sessionsQuery = userClient
+    .from("practice_sessions")
+    // Select all available columns. This lets reports work safely with an
+    // older database that has not yet received every optional migration.
+    .select("*")
+    .eq("user_id", userId)
+    .order("session_started_at", { ascending: false });
+
+  let attemptsQuery = userClient
+    .from("word_attempts")
+    .select("*")
+    .eq("user_id", userId)
+    .order("created_at", { ascending: false });
+
+  const customListsQuery = includeCustomLists
+    ? userClient
+        .from("custom_word_lists")
+        .select("id, words")
+        .eq("owner_user_id", userId)
+    : Promise.resolve({ data: [], error: null });
+
+  if (fromDate) {
+    sessionsQuery = sessionsQuery.gte("session_started_at", fromDate);
+    attemptsQuery = attemptsQuery.gte("created_at", fromDate);
+  }
+
+  const [
+    { data: sessions, error: sessionsError },
+    { data: attempts, error: attemptsError },
+    { data: customLists, error: customListsError },
+  ] = await Promise.all([sessionsQuery, attemptsQuery, customListsQuery]);
+
+  if (sessionsError) throw sessionsError;
+  if (attemptsError) throw attemptsError;
+  if (customListsError) throw customListsError;
+
+  return {
+    sessions: sessions ?? [],
+    attempts: attempts ?? [],
+    customLists: customLists ?? [],
+  };
+}
+
+/**
+ * Fetch one page of report session summaries and only the attempts belonging
+ * to those sessions. This keeps the Sessions tab bounded as history grows.
+ */
+export async function getReportSessionsPageFromDB(
+  authToken: string,
+  userId: string,
+  fromDate: string | undefined,
+  page: number,
+  pageSize: number,
+) {
+  const userClient = getSupabaseUserClient(authToken);
+  const offset = (page - 1) * pageSize;
+  let sessionsQuery = userClient
+    .from("practice_sessions")
+    .select("*", { count: "exact" })
+    .eq("user_id", userId)
+    .order("session_started_at", { ascending: false })
+    .range(offset, offset + pageSize - 1);
+
+  if (fromDate) {
+    sessionsQuery = sessionsQuery.gte("session_started_at", fromDate);
+  }
+
+  const {
+    data: sessions,
+    error: sessionsError,
+    count,
+  } = await sessionsQuery;
+  if (sessionsError) throw sessionsError;
+
+  const sessionRows = sessions ?? [];
+  if (sessionRows.length === 0) {
+    return { sessions: [], attempts: [], total: count ?? 0 };
+  }
+
+  const { data: attempts, error: attemptsError } = await userClient
+    .from("word_attempts")
+    .select("*")
+    .eq("user_id", userId)
+    .in("session_id", sessionRows.map((session) => session.id))
+    .order("created_at", { ascending: false });
+
+  if (attemptsError) throw attemptsError;
+  return {
+    sessions: sessionRows,
+    attempts: attempts ?? [],
+    total: count ?? sessionRows.length,
+  };
 }
 
 export async function getPracticeSessionFromDB(

@@ -403,6 +403,8 @@ export async function runSpellingCoachAgent(
         validatedInput.targetWord,
         normalizeSpellingCoachOutputChunkReason(parsedOutput),
       );
+      normalizeMissAnalysisErrorTypes(input, validatedOutput);
+      sanitizeMissAnalysis(validatedOutput);
       timings.push({
         stage: `schema_and_pattern_validation_${attempt + 1}`,
         durationMs: nowMs() - schemaValidationStart,

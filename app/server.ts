@@ -4,8 +4,18 @@ import * as Sentry from "@sentry/node";
 
 import { createServer } from "node:http";
 import { URL } from "node:url";
-import { randomUUID } from "node:crypto";
 import { authenticateRequest } from "./auth.js";
+import {
+  GuestIdentityError,
+  claimGuestIdentity,
+  endGuestPracticeSession,
+  getGuestPracticeSession,
+  getGuestSessionAttempts,
+  getGuestUsage,
+  recordGuestStandardAttempt,
+  startGuestIdentity,
+  startGuestPracticeSession,
+} from "./guestIdentity.js";
 import {
   fetchCustomListsFromDB,
   fetchCustomListByIdFromDB,
@@ -17,12 +27,11 @@ import {
   endPracticeSessionInDB,
   getUserStatisticsInDB,
   getSessionAttemptsFromDB,
+  getReportDataFromDB,
+  getReportSessionsPageFromDB,
   getPracticeSessionFromDB,
   getUserSubscriptionFromDB,
   updateUserSubscriptionInDB,
-  addChallengeToSession,
-  getChallengeFromSession,
-  peekChallengeInSession,
   type DBCustomList,
 } from "./supabase.js";
 import {
@@ -48,6 +57,11 @@ import {
 } from "./fileImportHandler.js";
 import { getConfiguredModelName } from "./modelConfig.js";
 import { isNewDeterministicPatternMatcherEnabled } from "./newPatternMatcher.js";
+import {
+  buildReportSection,
+  buildSessionWordDetails,
+  type ReportSection,
+} from "./reportBuilder.js";
 import { hasWordTeachingPrecompute, runSplitSpellingCoachAgent, warmWordTeachingPrecompute } from "./optimizedCoach.js";
 import { generatePronunciationAudio } from "./pronunciation.js";
 import { isNextStepEnabled, isRuntimeConceptTeachingEnabled } from "./prompt.js";
@@ -73,6 +87,7 @@ import {
   searchWords,
 } from "./wordCatalog.js";
 import { logError, logInfo } from "./logging.js";
+import { sendWeeklyEmailReports } from "./weeklyEmail.js";
 import {
   buildVoiceResponse,
   interpretVoiceUtterance,
@@ -134,6 +149,38 @@ function isStandardMode(mode: string): boolean {
   return mode === "standard" || mode.startsWith("standard_level_");
 }
 
+function reportRangeStart(range: string | null): string | undefined {
+  const daysByRange: Record<string, number> = { "7d": 7, "30d": 30, "90d": 90 };
+  const days = range ? daysByRange[range] : undefined;
+  if (!days) return undefined; // "all" (and omitted) means all available history.
+
+  const start = new Date();
+  start.setDate(start.getDate() - days);
+  return start.toISOString();
+}
+
+function reportFormatting(url: URL) {
+  const requestedLocale = url.searchParams.get("locale") || "en-US";
+  const requestedTimeZone = url.searchParams.get("timeZone") || "UTC";
+  let locale = "en-US";
+  let timeZone = "UTC";
+
+  try {
+    locale = new Intl.DateTimeFormat(requestedLocale).resolvedOptions().locale;
+  } catch {
+    // Keep the stable default for an invalid locale.
+  }
+  try {
+    timeZone = new Intl.DateTimeFormat("en-US", {
+      timeZone: requestedTimeZone,
+    }).resolvedOptions().timeZone;
+  } catch {
+    // Keep UTC for an invalid time-zone identifier.
+  }
+
+  return { locale, timeZone };
+}
+
 function sendUpgradeRequired(response: import("node:http").ServerResponse): void {
   sendJson(response, 402, {
     error: "Premium subscription required.",
@@ -141,14 +188,74 @@ function sendUpgradeRequired(response: import("node:http").ServerResponse): void
   });
 }
 
+function requestHeader(
+  request: import("node:http").IncomingMessage,
+  name: string,
+): string | undefined {
+  const value = request.headers[name];
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function guestTokenFromRequest(
+  request: import("node:http").IncomingMessage,
+): string | undefined {
+  return requestHeader(request, "x-guest-token")?.trim() || undefined;
+}
+
+async function enforceCoachingAccess(
+  request: import("node:http").IncomingMessage,
+  mode: string,
+): Promise<void> {
+  const guestToken = guestTokenFromRequest(request);
+  if (guestToken) {
+    if (!isStandardMode(mode)) {
+      throw new GuestIdentityError(
+        "Premium subscription required.",
+        402,
+        "SUBSCRIPTION_REQUIRED",
+      );
+    }
+    const usage = await getGuestUsage(guestToken, STANDARD_FREE_WORD_LIMIT);
+    if (usage.attemptsUsed >= usage.limit) {
+      throw new GuestIdentityError(
+        "Free attempt limit reached.",
+        402,
+        "FREE_ATTEMPT_LIMIT_REACHED",
+      );
+    }
+    return;
+  }
+
+  const user = await authenticateRequest(request);
+  const authHeader = request.headers.authorization || "";
+  const premium = await hasPremiumAccess(authHeader, user.id);
+  if (!isStandardMode(mode) && !premium) {
+    throw new GuestIdentityError(
+      "Premium subscription required.",
+      402,
+      "SUBSCRIPTION_REQUIRED",
+    );
+  }
+  if (isStandardMode(mode) && !premium) {
+    const attemptsUsed = await getStandardWordsUsed(authHeader, user.id);
+    if (attemptsUsed >= STANDARD_FREE_WORD_LIMIT) {
+      throw new GuestIdentityError(
+        "Premium subscription required.",
+        402,
+        "SUBSCRIPTION_REQUIRED",
+      );
+    }
+  }
+}
+
 function sendJson(response: import("node:http").ServerResponse, statusCode: number, body: unknown) {
   response.writeHead(statusCode, {
     "Content-Type": "application/json; charset=utf-8",
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, x-audio-filename",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, x-audio-filename, x-guest-token",
   });
-  response.end(`${JSON.stringify(body, null, 2)}\n`);
+  response.end(JSON.stringify(body));
 }
 
 function sendAudio(
@@ -165,7 +272,7 @@ function sendAudio(
     "Cache-Control": options.cacheControl ?? "public, max-age=3600",
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, x-audio-filename",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, x-audio-filename, x-guest-token",
   });
   response.end(Buffer.from(audio));
 }
@@ -241,6 +348,59 @@ export default async function handler(
   });
 
   try {
+    if (request.method === "POST" && url.pathname === "/api/guests/start") {
+      const forwardedFor = request.headers["x-forwarded-for"];
+      const ipAddress = Array.isArray(forwardedFor)
+        ? forwardedFor[0]
+        : forwardedFor?.split(",")[0] || request.socket?.remoteAddress;
+      const existingToken = guestTokenFromRequest(request);
+
+      try {
+        const guest = await startGuestIdentity({
+          existingToken,
+          ipAddress,
+          limit: STANDARD_FREE_WORD_LIMIT,
+        });
+        sendJson(response, 200, guest);
+      } catch (error) {
+        if (error instanceof GuestIdentityError) {
+          sendJson(response, error.statusCode, {
+            error: error.message,
+            code: error.code,
+          });
+          return;
+        }
+        throw error;
+      }
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/guests/claim") {
+      const token = guestTokenFromRequest(request);
+      if (!token) {
+        sendJson(response, 400, {
+          error: "Missing guest token.",
+          code: "MISSING_GUEST_TOKEN",
+        });
+        return;
+      }
+      const user = await authenticateRequest(request);
+      const transferredAttempts = await claimGuestIdentity(token, user.id);
+      sendJson(response, 200, { transferredAttempts });
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/cron/weekly-report") {
+      const secret = process.env.CRON_SECRET;
+      if (!secret || request.headers.authorization !== `Bearer ${secret}`) {
+        sendJson(response, 401, { error: "Unauthorized." });
+        return;
+      }
+      const result = await sendWeeklyEmailReports();
+      sendJson(response, result.failures.length ? 207 : 200, result);
+      return;
+    }
+
     if (request.method === "GET" && url.pathname === "/api/health") {
       const runtime =
         process.env.SPELLING_COACH_RUNTIME === "direct"
@@ -299,11 +459,8 @@ export default async function handler(
         foreignOrigin: url.searchParams.get("foreignOrigin") ?? undefined,
         exclude: url.searchParams.get("exclude") ?? undefined,
       });
-      const sessionId = url.searchParams.get("sessionId") ?? undefined;
       let customWordsFallback: any[] | undefined;
-      // Always authenticate so we can store the challengeId in the session when sessionId is present.
-      // For custom lists, authentication was already required.
-      const user = (query.customListId || sessionId)
+      const user = query.customListId
         ? await authenticateRequest(request)
         : undefined;
 
@@ -315,23 +472,9 @@ export default async function handler(
         }
       }
 
-      let excludeList = query.exclude || [];
-      if (sessionId && user) {
-        const authHeader = request.headers.authorization || "";
-        try {
-          const attempts = await getSessionAttemptsFromDB(authHeader, user.id, sessionId);
-          if (attempts && attempts.length > 0) {
-            const dbExclude = attempts.map((a: any) => a.target_word);
-            excludeList = [...new Set([...excludeList, ...dbExclude])];
-          }
-        } catch (err) {
-          logError("Failed to fetch session attempts for exclude logic:", err);
-        }
-      }
-
       const word = pickNextWord(
         query.level,
-        excludeList,
+        query.exclude,
         query.customListId,
         query.foreignOrigin,
         user?.id,
@@ -348,28 +491,7 @@ export default async function handler(
         .catch((error) => {
           logError("Word teaching precompute failed:", error);
         });
-
-      // Generate a challengeId and store the word securely in the session.
-      // A sessionId is required for all authenticated practice.
-      if (!sessionId || !user) {
-        sendJson(response, 400, { error: "sessionId is required to fetch a word." });
-        return;
-      }
-
-      const authHeader = request.headers.authorization || "";
-      const challengeId = randomUUID();
-      try {
-        await addChallengeToSession(authHeader, user.id, sessionId, challengeId, word.word);
-      } catch (err) {
-        logError("Failed to store challengeId in session:", err);
-        sendJson(response, 500, { error: "Could not prepare word challenge. Please try again." });
-        return;
-      }
-
-      const wordResponse = buildWordResponse(word);
-      // The plain word field is intentionally omitted — challengeId is the only reference.
-      const { word: _omitted, ...wordMetadata } = wordResponse;
-      sendJson(response, 200, { ...wordMetadata, challengeId });
+      sendJson(response, 200, buildWordResponse(word));
       return;
     }
 
@@ -402,7 +524,7 @@ export default async function handler(
       const encodedWord = parts[3];
       const tail = parts[4];
 
-      if (tail === "pronunciation" || encodedWord === "import-jobs" || encodedWord === "pronunciation") {
+      if (tail === "pronunciation" || encodedWord === "import-jobs") {
         // handled below
       } else if (encodedWord) {
         const word = decodeURIComponent(encodedWord);
@@ -615,7 +737,110 @@ export default async function handler(
       return;
     }
 
-    if (request.method === "GET" && url.pathname === "/api/sessions/attempts") {
+    if (request.method === "GET" && url.pathname === "/api/reports") {
+      const user = await authenticateRequest(request);
+      const authHeader = request.headers.authorization || "";
+      const range = url.searchParams.get("range") || "30d";
+      const section = (url.searchParams.get("section") || "overview") as ReportSection;
+      const sections: ReportSection[] = [
+        "overview",
+        "missAnalysis",
+        "wordKnowledge",
+        "supportUsage",
+        "sessions",
+        "mockBee",
+      ];
+
+      if (!["7d", "30d", "90d", "all"].includes(range)) {
+        sendJson(response, 400, { error: "range must be 7d, 30d, 90d, or all" });
+        return;
+      }
+      if (!sections.includes(section)) {
+        sendJson(response, 400, { error: `section must be one of: ${sections.join(", ")}` });
+        return;
+      }
+
+      const fromDate = reportRangeStart(range);
+      const requestedPage = Number.parseInt(url.searchParams.get("page") || "1", 10);
+      const requestedPageSize = Number.parseInt(url.searchParams.get("pageSize") || "10", 10);
+      const page = Number.isFinite(requestedPage) && requestedPage > 0 ? requestedPage : 1;
+      const pageSize = Number.isFinite(requestedPageSize)
+        ? Math.min(Math.max(requestedPageSize, 1), 50)
+        : 10;
+      const pagedReport = section === "sessions"
+        ? await getReportSessionsPageFromDB(
+            authHeader,
+            user.id,
+            fromDate,
+            page,
+            pageSize,
+          )
+        : null;
+      const report = pagedReport ?? await getReportDataFromDB(
+        authHeader,
+        user.id,
+        fromDate,
+        section === "wordKnowledge",
+      );
+      const sessionsById = new Map(report.sessions.map((session) => [session.id, session]));
+      const customListsById = new Map(
+        ("customLists" in report ? report.customLists : []).map((list) => [list.id, list]),
+      );
+      const attempts =
+        section === "wordKnowledge"
+          ? report.attempts.map((attempt) => {
+              const localWord = getWordByText(attempt.target_word);
+
+              let customWord;
+
+              if (!localWord) {
+                const session = sessionsById.get(attempt.session_id);
+                const customList = session?.custom_list_id
+                  ? customListsById.get(session.custom_list_id)
+                  : undefined;
+
+                customWord = Array.isArray(customList?.words)
+                  ? customList.words.find(
+                      (word) =>
+                        word.word.toLowerCase() ===
+                        attempt.target_word.toLowerCase(),
+                    )
+                  : undefined;
+              }
+
+              const word = localWord ?? customWord;
+
+              return {
+                ...attempt,
+                word_catalog_entry: word
+                  ? buildWordResponse(word)
+                  : null,
+              };
+            })
+          : report.attempts;
+      const data = buildReportSection(
+        { sessions: report.sessions, attempts },
+        section,
+        reportFormatting(url),
+      );
+      sendJson(response, 200, pagedReport
+        ? {
+            ...data,
+            pagination: {
+              page,
+              pageSize,
+              total: pagedReport.total,
+              totalPages: Math.max(1, Math.ceil(pagedReport.total / pageSize)),
+            },
+          }
+        : data);
+      return;
+    }
+
+    if (
+      request.method === "GET"
+      && url.pathname === "/api/reports/session-details"
+    ) {
       const user = await authenticateRequest(request);
       const authHeader = request.headers.authorization || "";
       const sessionId = url.searchParams.get("sessionId");
@@ -623,7 +848,32 @@ export default async function handler(
         sendJson(response, 400, { error: "Missing sessionId query parameter" });
         return;
       }
-      const attempts = await getSessionAttemptsFromDB(authHeader, user.id, sessionId);
+      const attempts = await getSessionAttemptsFromDB(
+        authHeader,
+        user.id,
+        sessionId,
+      );
+      sendJson(response, 200, {
+        words: buildSessionWordDetails(attempts),
+      });
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/sessions/attempts") {
+      const sessionId = url.searchParams.get("sessionId");
+      if (!sessionId) {
+        sendJson(response, 400, { error: "Missing sessionId query parameter" });
+        return;
+      }
+      const guestToken = guestTokenFromRequest(request);
+      let attempts;
+      if (guestToken) {
+        attempts = await getGuestSessionAttempts(guestToken, sessionId);
+      } else {
+        const user = await authenticateRequest(request);
+        const authHeader = request.headers.authorization || "";
+        attempts = await getSessionAttemptsFromDB(authHeader, user.id, sessionId);
+      }
       const enrichedAttempts = attempts.map((att) => {
         const wordCatalogEntry = getWordByText(att.target_word);
         return {
@@ -636,21 +886,25 @@ export default async function handler(
     }
 
     if (request.method === "GET" && url.pathname === "/api/sessions/current") {
-      const user = await authenticateRequest(request);
-      const authHeader = request.headers.authorization || "";
       const sessionId = url.searchParams.get("sessionId");
       if (!sessionId) {
         sendJson(response, 400, { error: "Missing sessionId query parameter" });
         return;
       }
-      const session = await getPracticeSessionFromDB(authHeader, user.id, sessionId);
+      const guestToken = guestTokenFromRequest(request);
+      let session;
+      if (guestToken) {
+        session = await getGuestPracticeSession(guestToken, sessionId);
+      } else {
+        const user = await authenticateRequest(request);
+        const authHeader = request.headers.authorization || "";
+        session = await getPracticeSessionFromDB(authHeader, user.id, sessionId);
+      }
       sendJson(response, 200, { session });
       return;
     }
 
     if (request.method === "POST" && url.pathname === "/api/sessions/start") {
-      const user = await authenticateRequest(request);
-      const authHeader = request.headers.authorization || "";
       const rawBody = await collectBody(request);
       const {
         mode,
@@ -659,6 +913,22 @@ export default async function handler(
         originLanguage,
         customListId,
       } = JSON.parse(rawBody);
+
+      const guestToken = guestTokenFromRequest(request);
+      if (guestToken) {
+        const result = await startGuestPracticeSession({
+          token: guestToken,
+          mode,
+          level,
+          forceCloseCurrent,
+          limit: STANDARD_FREE_WORD_LIMIT,
+        });
+        sendJson(response, 200, result);
+        return;
+      }
+
+      const user = await authenticateRequest(request);
+      const authHeader = request.headers.authorization || "";
 
       const premium = await hasPremiumAccess(authHeader, user.id);
       if (!isStandardMode(mode) && !premium) {
@@ -689,8 +959,6 @@ export default async function handler(
     }
 
     if (request.method === "POST" && url.pathname === "/api/sessions/attempts") {
-      const user = await authenticateRequest(request);
-      const authHeader = request.headers.authorization || "";
       const rawBody = await collectBody(request);
       const {
         sessionId,
@@ -712,6 +980,35 @@ export default async function handler(
         sendJson(response, 400, { error: "mode is required" });
         return;
       }
+
+      const guestToken = guestTokenFromRequest(request);
+      if (guestToken) {
+        if (!isStandardMode(mode)) {
+          sendUpgradeRequired(response);
+          return;
+        }
+        const result = await recordGuestStandardAttempt({
+          token: guestToken,
+          sessionId,
+          targetWord,
+          childAttempt,
+          isCorrect,
+          level,
+          definitionViewed,
+          exampleViewed,
+          originViewed,
+          partOfSpeechViewed,
+          repeatWordCount,
+          usedVoiceInput,
+          coachingResponse,
+          limit: STANDARD_FREE_WORD_LIMIT,
+        });
+        sendJson(response, 200, result);
+        return;
+      }
+
+      const user = await authenticateRequest(request);
+      const authHeader = request.headers.authorization || "";
 
       const premium = await hasPremiumAccess(authHeader, user.id);
       if (!isStandardMode(mode) && !premium) {
@@ -749,10 +1046,22 @@ export default async function handler(
     }
 
     if (request.method === "POST" && url.pathname === "/api/sessions/end") {
-      const user = await authenticateRequest(request);
-      const authHeader = request.headers.authorization || "";
       const rawBody = await collectBody(request);
       const { sessionId, totalWordsAttempted, totalCorrect, durationSeconds } = JSON.parse(rawBody);
+
+      const guestToken = guestTokenFromRequest(request);
+      if (guestToken) {
+        await endGuestPracticeSession({
+          token: guestToken,
+          sessionId,
+          durationSeconds: durationSeconds || 0,
+        });
+        sendJson(response, 200, { success: true });
+        return;
+      }
+
+      const user = await authenticateRequest(request);
+      const authHeader = request.headers.authorization || "";
 
       await endPracticeSessionInDB(
         authHeader,
@@ -837,31 +1146,31 @@ export default async function handler(
       return;
     }
 
-    // Secure pronunciation route: resolves word via challengeId without exposing it in the URL.
-    // This is the final route used after the frontend is fully migrated to challengeId.
-    // The legacy /api/words/:word/pronunciation route below is a temporary backward-compatibility path.
     if (
       request.method === "GET" &&
-      url.pathname === "/api/words/pronunciation"
+      url.pathname.startsWith("/api/words/") &&
+      url.pathname.endsWith("/pronunciation")
     ) {
-      const challengeId = url.searchParams.get("challengeId");
-      const sessionId = url.searchParams.get("sessionId");
+      const parts = url.pathname.split("/");
+      const encodedWord = parts[3];
+      const word = decodeURIComponent(encodedWord ?? "");
 
-      if (!challengeId || !sessionId) {
-        sendJson(response, 400, { error: "challengeId and sessionId are required." });
+      if (!word) {
+        sendJson(response, 400, { error: "Word is required." });
         return;
       }
 
-      const user = await authenticateRequest(request);
-      const authHeader = request.headers.authorization || "";
-      const resolvedWord = await peekChallengeInSession(authHeader, user.id, sessionId, challengeId);
-
-      if (!resolvedWord) {
-        sendJson(response, 400, { error: "Invalid or expired challengeId." });
-        return;
+      const wordEntry = getWordByText(word);
+      if (!wordEntry) {
+        // If it is not in catalog, check if it's a valid alphabetic word to prevent arbitrary text abuse
+        if (!/^[a-zA-Z\s-]+$/.test(word)) {
+          sendJson(response, 404, { error: `Unknown word: ${word}` });
+          return;
+        }
       }
+      const targetWordText = wordEntry ? wordEntry.word : word;
 
-      const audio = await generatePronunciationAudio(resolvedWord);
+      const audio = await generatePronunciationAudio(targetWordText);
       sendAudio(response, 200, audio);
       return;
     }
@@ -910,28 +1219,12 @@ export default async function handler(
 
     if (request.method === "POST" && url.pathname === "/api/voice/respond") {
       const rawBody = await collectBody(request);
-      const parsed = JSON.parse(rawBody);
-
-      let targetWord: string;
-      if (parsed.challengeId && parsed.sessionId) {
-        // Secure path: resolve the word from the active session.
-        const user = await authenticateRequest(request);
-        const authHeader = request.headers.authorization || "";
-        const resolved = await peekChallengeInSession(authHeader, user.id, parsed.sessionId, parsed.challengeId);
-        if (!resolved) {
-          sendJson(response, 400, { error: "Invalid or expired challengeId." });
-          return;
-        }
-        targetWord = resolved;
-      } else {
-        // Legacy path: targetWord sent directly. Validate via existing schema.
-        const requestBody = VoiceRespondRequestSchema.parse(parsed);
-        targetWord = requestBody.targetWord;
-      }
-
-      const includeAudio = typeof parsed.includeAudio === "boolean" ? parsed.includeAudio : true;
-      const utterance = String(parsed.utterance ?? "");
-      const result = await buildVoiceResponse(targetWord, utterance, includeAudio);
+      const requestBody = VoiceRespondRequestSchema.parse(JSON.parse(rawBody));
+      const result = await buildVoiceResponse(
+        requestBody.targetWord,
+        requestBody.utterance,
+        requestBody.includeAudio ?? true,
+      );
       sendJson(response, 200, result);
       return;
     }
@@ -950,6 +1243,7 @@ export default async function handler(
       const startTime = Date.now();
       const rawBody = await collectBody(request);
       const requestBody = CoachingRequestSchema.parse(JSON.parse(rawBody));
+      await enforceCoachingAccess(request, "standard");
       const coachInput = buildSpellingCoachInput(requestBody);
       const result = hasWordTeachingPrecompute(coachInput)
         ? await runSplitSpellingCoachAgent(coachInput)
@@ -988,28 +1282,8 @@ export default async function handler(
         throw error;
       }
 
-      // If a challengeId was provided, resolve it to the targetWord via the session.
-      const parsedBody = requestBody as { challengeId?: string; sessionId?: string; targetWord?: string };
-      if (parsedBody.challengeId) {
-        if (!parsedBody.sessionId) {
-          sendJson(response, 400, { error: "sessionId is required when challengeId is provided." });
-          return;
-        }
-        const authHeader = request.headers.authorization || "";
-        const user = await authenticateRequest(request);
-        const resolvedWord = await getChallengeFromSession(
-          authHeader,
-          user.id,
-          parsedBody.sessionId,
-          parsedBody.challengeId,
-        );
-        if (!resolvedWord) {
-          sendJson(response, 400, { error: "Invalid or expired challengeId." });
-          return;
-        }
-        // Inject the resolved targetWord and strip challengeId before passing downstream.
-        requestBody = { ...parsedBody, targetWord: resolvedWord, challengeId: undefined };
-      }
+      const parsedRequestBody = requestBody as { mode: string };
+      await enforceCoachingAccess(request, parsedRequestBody.mode);
 
       try {
         await streamSpellingCoach(
@@ -1415,6 +1689,13 @@ export default async function handler(
       error.message.includes("is already completed.")
     ) {
       sendJson(response, 409, { error: error.message });
+      return;
+    }
+    if (error instanceof GuestIdentityError) {
+      sendJson(response, error.statusCode, {
+        error: error.message,
+        code: error.code,
+      });
       return;
     }
     if (isAuthError(error)) {
