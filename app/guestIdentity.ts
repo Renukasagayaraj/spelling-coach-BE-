@@ -133,6 +133,21 @@ function hashIpAddress(ipAddress: string | undefined, secret: string): string | 
     : null;
 }
 
+export function normalizeGuestLocation(options: {
+  country?: string;
+  region?: string;
+  city?: string;
+}) {
+  const countryValue = options.country?.trim().toUpperCase();
+  const regionValue = options.region?.trim().toUpperCase();
+  const cityValue = options.city?.trim();
+  return {
+    country: countryValue && /^[A-Z]{2}$/.test(countryValue) ? countryValue : null,
+    region: regionValue && /^[A-Z0-9-]{1,16}$/.test(regionValue) ? regionValue : null,
+    city: cityValue ? cityValue.slice(0, 120) : null,
+  };
+}
+
 async function requireGuestIdentity(token: string) {
   const secret = guestTokenSecret();
   const guestId = verifyGuestToken(token, secret).guestId;
@@ -235,7 +250,8 @@ export async function startGuestPracticeSession(options: {
       })
       .eq("id", activeSession.id)
       .eq(ownerColumn, ownerId)
-      .eq("origin_guest_id", guestId);
+      .eq("origin_guest_id", guestId)
+      .eq("status", "active");
     if (closeError) throw closeError;
   }
 
@@ -324,7 +340,8 @@ export async function endGuestPracticeSession(options: {
     })
     .eq("id", options.sessionId)
     .eq(ownerColumn, ownerId)
-    .eq("origin_guest_id", guestId);
+    .eq("origin_guest_id", guestId)
+    .eq("status", "active");
   if (error) throw error;
 }
 
@@ -436,11 +453,15 @@ export async function claimGuestIdentity(token: string, userId: string) {
 export async function startGuestIdentity(options: {
   existingToken?: string;
   ipAddress?: string;
+  country?: string;
+  region?: string;
+  city?: string;
   limit: number;
 }): Promise<GuestStartResult> {
   const secret = guestTokenSecret();
   const client = guestServiceClient();
   const ipHash = hashIpAddress(options.ipAddress, secret);
+  const location = normalizeGuestLocation(options);
   let guestId: string;
 
   if (options.existingToken) {
@@ -454,9 +475,16 @@ export async function startGuestIdentity(options: {
     if (!data) {
       throw new GuestIdentityError("Guest identity was not found.", 401, "INVALID_GUEST_TOKEN");
     }
+    const updateValues: Record<string, string | null> = {
+      last_seen_at: new Date().toISOString(),
+    };
+    if (ipHash) updateValues.ip_hash = ipHash;
+    if (location.country) updateValues.country = location.country;
+    if (location.region) updateValues.region = location.region;
+    if (location.city) updateValues.city = location.city;
     const { error: updateError } = await client
       .from("guest_identities")
-      .update({ last_seen_at: new Date().toISOString(), ip_hash: ipHash })
+      .update(updateValues)
       .eq("id", guestId);
     if (updateError) throw updateError;
   } else {
@@ -464,6 +492,9 @@ export async function startGuestIdentity(options: {
     const { error } = await client.from("guest_identities").insert({
       id: guestId,
       ip_hash: ipHash,
+      country: location.country,
+      region: location.region,
+      city: location.city,
     });
     if (error) throw error;
   }

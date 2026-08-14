@@ -105,6 +105,24 @@ Set these server-side environment variables before enabling the feature:
 
 Run `db/migration/V14__add_weekly_email_reports.sql` in the Supabase SQL editor before deploying. It adds the opt-in preference and an idempotent send log.
 
+### Inactive practice sessions
+
+Run `db/migration/V17__abandon_inactive_practice_sessions.sql` once in each
+Supabase environment, followed by
+`db/migration/V18__reject_attempts_for_inactive_sessions.sql`. Together they:
+
+- add and backfill `practice_sessions.last_activity_at`;
+- refresh that timestamp whenever a `word_attempts` row is inserted;
+- enable Supabase Cron and schedule active sessions to become `abandoned`
+  after 30 minutes without a word submission; and
+- reject word attempts from stale browser tabs after their session is no
+  longer active.
+
+The scheduled job is named `abandon-inactive-practice-sessions` and runs every
+minute. Its runs can be checked in Supabase Dashboard under Integrations → Cron.
+This job runs inside Supabase, so no Vercel Cron or additional Vercel environment
+variable is required.
+
 ## Common Local Start Commands
 
 Default run:

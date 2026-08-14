@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   GuestIdentityError,
+  normalizeGuestLocation,
   signGuestToken,
   verifyGuestToken,
 } from "../guestIdentity.js";
@@ -29,5 +30,24 @@ test("guest tokens reject modified signatures and payloads", () => {
   assert.throws(
     () => verifyGuestToken("not-a-valid-token", TEST_SECRET),
     (error) => error instanceof GuestIdentityError && error.statusCode === 401,
+  );
+});
+
+test("guest location values are normalized and invalid values are discarded", () => {
+  assert.deepEqual(
+    normalizeGuestLocation({
+      country: " in ",
+      region: " tn ",
+      city: " Chennai ",
+    }),
+    { country: "IN", region: "TN", city: "Chennai" },
+  );
+  assert.deepEqual(
+    normalizeGuestLocation({
+      country: "India",
+      region: "not a valid region!",
+      city: " ",
+    }),
+    { country: null, region: null, city: null },
   );
 });

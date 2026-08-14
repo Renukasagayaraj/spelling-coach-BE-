@@ -196,6 +196,19 @@ function requestHeader(
   return Array.isArray(value) ? value[0] : value;
 }
 
+function decodedRequestHeader(
+  request: import("node:http").IncomingMessage,
+  name: string,
+): string | undefined {
+  const value = requestHeader(request, name)?.trim();
+  if (!value) return undefined;
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
 function guestTokenFromRequest(
   request: import("node:http").IncomingMessage,
 ): string | undefined {
@@ -354,11 +367,17 @@ export default async function handler(
         ? forwardedFor[0]
         : forwardedFor?.split(",")[0] || request.socket?.remoteAddress;
       const existingToken = guestTokenFromRequest(request);
+      const country = decodedRequestHeader(request, "x-vercel-ip-country");
+      const region = decodedRequestHeader(request, "x-vercel-ip-country-region");
+      const city = decodedRequestHeader(request, "x-vercel-ip-city");
 
       try {
         const guest = await startGuestIdentity({
           existingToken,
           ipAddress,
+          country,
+          region,
+          city,
           limit: STANDARD_FREE_WORD_LIMIT,
         });
         sendJson(response, 200, guest);
@@ -1689,6 +1708,18 @@ export default async function handler(
       error.message.includes("is already completed.")
     ) {
       sendJson(response, 409, { error: error.message });
+      return;
+    }
+    if (
+      error &&
+      typeof error === "object" &&
+      "message" in error &&
+      String(error.message).includes("PRACTICE_SESSION_NOT_ACTIVE")
+    ) {
+      sendJson(response, 409, {
+        error: "This practice session is no longer active.",
+        code: "PRACTICE_SESSION_NOT_ACTIVE",
+      });
       return;
     }
     if (error instanceof GuestIdentityError) {

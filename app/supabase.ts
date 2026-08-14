@@ -648,7 +648,8 @@ export async function endPracticeSessionInDB(
       duration_seconds: durationSeconds,
     })
     .eq("id", sessionId)
-    .eq("user_id", userId);
+    .eq("user_id", userId)
+    .eq("status", "active");
 
   if (error) {
     throw error;
