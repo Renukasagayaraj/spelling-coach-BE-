@@ -227,138 +227,274 @@ function groupSupport<Field extends "mode" | "level">(
   return [...rows.values()];
 }
 
-export function buildReportData(
-  source: { sessions: ReportSession[]; attempts: ReportAttempt[] },
-  formatting: ReportFormatting = {},
-) {
-  const formatDate = dateFormatter(formatting, { month: "short", day: "numeric" });
-  const formatDateTime = dateFormatter(formatting, {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
-  const sessionsById = new Map(
-    source.sessions.map((session) => [session.id, session]),
-  );
-  const attempts = [...source.attempts].sort(
+type ReportSource = { sessions: ReportSession[]; attempts: ReportAttempt[] };
+
+function sessionsById(source: ReportSource) {
+  return new Map(source.sessions.map((session) => [session.id, session]));
+}
+
+function sortedAttempts(source: ReportSource) {
+  return [...source.attempts].sort(
     (a, b) =>
       new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
   );
+}
+
+function displayDate(formatting: ReportFormatting) {
+  const formatter = dateFormatter(formatting, { month: "short", day: "numeric" });
+  return (value: string) => formatter.format(new Date(value));
+}
+
+function countBy<Field extends string>(counts: Counts, field: Field) {
+  return countRows(counts).map((row) => ({
+    [field]: row.label,
+    attempts: row.count,
+  })) as Array<{ [Key in Field]: string } & { attempts: number }>;
+}
+
+function countByFixedOrder<Field extends string>(
+  counts: Counts,
+  order: readonly string[],
+  field: Field,
+) {
+  return order
+    .filter((value) => counts[value] != null)
+    .map((value) => ({
+      [field]: value,
+      attempts: counts[value] ?? 0,
+    })) as Array<{ [Key in Field]: string } & { attempts: number }>;
+}
+
+export function buildOverviewSection(
+  source: ReportSource,
+  formatting: ReportFormatting = {},
+) {
+  const attempts = sortedAttempts(source);
+  const sessionMap = sessionsById(source);
   const completedSessions = source.sessions.filter(
     (session) => session.status === "completed",
   );
   const correct = attempts.filter((attempt) => attempt.is_correct).length;
-  const incorrect = attempts.length - correct;
   const byDate: Record<
     string,
     { timestamp: number; date: string; attempts: number; correct: number }
   > = {};
   const byMode: Counts = {};
   const byLevel: Counts = {};
-  const byOrigin: Counts = {};
-  const byPos: Counts = {};
-  const byDifficulty: Counts = {};
-  const byGradeBand: Counts = {};
-  const missedOrigins: Counts = {};
-  const primary: Counts = {};
-  const secondary: Counts = {};
+  const attemptCountsBySession: Counts = {};
+  const formatDate = displayDate(formatting);
 
   for (const attempt of attempts) {
-    const session = sessionsById.get(attempt.session_id);
+    const session = sessionMap.get(attempt.session_id);
+    const timestamp = new Date(attempt.created_at).getTime();
     const dateKey = calendarDateKey(attempt.created_at, formatting);
-    const date = formatDate.format(new Date(attempt.created_at));
     const trend = byDate[dateKey] ?? {
-      timestamp: new Date(attempt.created_at).getTime(),
-      date,
+      timestamp,
+      date: formatDate(attempt.created_at),
       attempts: 0,
       correct: 0,
     };
     trend.attempts += 1;
     trend.correct += attempt.is_correct ? 1 : 0;
-    trend.timestamp = Math.min(
-      trend.timestamp,
-      new Date(attempt.created_at).getTime(),
-    );
+    trend.timestamp = Math.min(trend.timestamp, timestamp);
     byDate[dateKey] = trend;
     add(byMode, modeLabel(session?.mode));
     if (hasAssignedLevel(attempt, session)) {
       add(byLevel, levelLabel(attempt.level, session?.mode));
     }
+    add(attemptCountsBySession, attempt.session_id);
+  }
+
+  const trendRows = Object.values(byDate).sort(
+    (a, b) => a.timestamp - b.timestamp,
+  );
+  return {
+    totalAttempted: attempts.length,
+    accuracy: attempts.length ? Math.round((correct / attempts.length) * 100) : 0,
+    totalCorrect: correct,
+    totalIncorrect: attempts.length - correct,
+    sessionsCompleted: completedSessions.length,
+    avgAttemptsPerSession: completedSessions.length
+      ? Number((
+          completedSessions.reduce(
+            (total, session) => total + (
+              session.total_words_attempted ?? attemptCountsBySession[session.id] ?? 0
+            ),
+            0,
+          ) / completedSessions.length
+        ).toFixed(1))
+      : 0,
+    practiceTimeMinutes: Math.round(
+      completedSessions.reduce(
+        (total, session) => total + (session.duration_seconds ?? 0),
+        0,
+      ) / 60,
+    ),
+    accuracyTrend: trendRows.map((row) => ({
+      date: row.date,
+      accuracy: Math.round((row.correct / row.attempts) * 100),
+    })),
+    attemptsTrend: trendRows.map(({ date, attempts: count }) => ({
+      date,
+      attempts: count,
+    })),
+    byMode: countByFixedOrder(byMode, MODE_ORDER, "mode"),
+    byLevel: countByFixedOrder(byLevel, LEVEL_ORDER, "level"),
+  };
+}
+
+function missBreakdown<Field extends "mode" | "level">(
+  attempts: ReportAttempt[],
+  sessionMap: Map<string, ReportSession>,
+  key: Field,
+) {
+  const scopedAttempts = key === "level"
+    ? attempts.filter((attempt) =>
+        hasAssignedLevel(attempt, sessionMap.get(attempt.session_id)))
+    : attempts;
+  const categories = [...new Set(
+    scopedAttempts
+      .filter((attempt) => !attempt.is_correct)
+      .map((attempt) => labelError(coachingErrors(attempt).primary)),
+  )];
+  const groups = [...new Set(scopedAttempts.map((attempt) =>
+    key === "mode"
+      ? modeLabel(sessionMap.get(attempt.session_id)?.mode)
+      : levelLabel(attempt.level, sessionMap.get(attempt.session_id)?.mode)))];
+
+  return groups.map((value) => {
+    const counts = Object.fromEntries(
+      categories.map((category) => [category, 0]),
+    ) as Record<string, number>;
+    scopedAttempts
+      .filter((attempt) => {
+        const group = key === "mode"
+          ? modeLabel(sessionMap.get(attempt.session_id)?.mode)
+          : levelLabel(attempt.level, sessionMap.get(attempt.session_id)?.mode);
+        return group === value && !attempt.is_correct;
+      })
+      .forEach((attempt) => {
+        const error = labelError(coachingErrors(attempt).primary);
+        counts[error] = (counts[error] ?? 0) + 1;
+      });
+    return { [key]: value, ...counts };
+  });
+}
+
+export function buildMissAnalysisSection(
+  source: ReportSource,
+  formatting: ReportFormatting = {},
+) {
+  const attempts = sortedAttempts(source);
+  const sessionMap = sessionsById(source);
+  const primary: Counts = {};
+  const secondary: Counts = {};
+  const formatDate = displayDate(formatting);
+
+  for (const attempt of attempts) {
+    if (attempt.is_correct) continue;
+    const errors = coachingErrors(attempt);
+    add(primary, labelError(errors.primary));
+    errors.secondary.forEach((error) => add(secondary, labelError(error)));
+  }
+
+  const recentMiss = (attempt: ReportAttempt) => {
+    const errors = coachingErrors(attempt);
+    const session = sessionMap.get(attempt.session_id);
+    return {
+      target: attempt.target_word,
+      attempt: attempt.child_attempt,
+      primary: labelError(errors.primary),
+      secondary: errors.secondary.map(labelError),
+      date: formatDate(attempt.created_at),
+      mode: modeLabel(session?.mode),
+      level: levelLabel(attempt.level, session?.mode),
+    };
+  };
+
+  return {
+    primary: countRows(primary).map(({ label, count }) => ({
+      key: label,
+      label,
+      count,
+    })),
+    secondary: countRows(secondary).map(({ label, count }) => ({
+      key: label,
+      label,
+      count,
+    })),
+    byLevel: missBreakdown(attempts, sessionMap, "level"),
+    byMode: missBreakdown(attempts, sessionMap, "mode"),
+    recentIncorrect: attempts
+      .filter((attempt) => !attempt.is_correct)
+      .slice(0, 20)
+      .map(recentMiss),
+    recentMissedWords: [...new Map(
+      attempts
+        .filter((attempt) => !attempt.is_correct)
+        .map((attempt) => [attempt.target_word.toLowerCase(), attempt]),
+    ).values()].slice(0, 20).map(recentMiss),
+  };
+}
+
+export function buildWordKnowledgeSection(
+  source: ReportSource,
+  formatting: ReportFormatting = {},
+) {
+  const attempts = sortedAttempts(source);
+  const sessionMap = sessionsById(source);
+  const byOrigin: Counts = {};
+  const byPos: Counts = {};
+  const byDifficulty: Counts = {};
+  const byGradeBand: Counts = {};
+  const missedOrigins: Counts = {};
+  const formatDate = displayDate(formatting);
+
+  for (const attempt of attempts) {
     const word = attempt.word_catalog_entry;
     const origin = word?.mainOrigin?.trim() || "Unknown";
     add(byOrigin, origin);
     add(byPos, word?.partOfSpeech || "Other");
     add(byDifficulty, word?.difficulty || "Unknown");
     add(byGradeBand, word?.gradeBand || "Unknown");
-
-    if (!attempt.is_correct) {
-      add(missedOrigins, origin);
-      const errors = coachingErrors(attempt);
-      add(primary, labelError(errors.primary));
-      errors.secondary.forEach((error) => add(secondary, labelError(error)));
-    }
+    if (!attempt.is_correct) add(missedOrigins, origin);
   }
 
-  const trendRows = Object.values(byDate).sort(
-    (a, b) => a.timestamp - b.timestamp,
-  );
-  const countBy = <Field extends string>(counts: Counts, field: Field) =>
-    countRows(counts).map((row) => ({
-      [field]: row.label,
-      attempts: row.count,
-    })) as Array<{ [Key in Field]: string } & { attempts: number }>;
-  const countByFixedOrder = <Field extends string>(
-    counts: Counts,
-    order: readonly string[],
-    field: Field,
-  ) => order
-    .filter((value) => counts[value] != null)
-    .map((value) => ({
-      [field]: value,
-      attempts: counts[value] ?? 0,
-    })) as Array<{ [Key in Field]: string } & { attempts: number }>;
-
-  const missBy = <Field extends "mode" | "level">(key: Field) => {
-    const scopedAttempts = key === "level"
-      ? attempts.filter((attempt) =>
-          hasAssignedLevel(attempt, sessionsById.get(attempt.session_id)))
-      : attempts;
-    const categories = [...new Set(
-      scopedAttempts
-        .filter((attempt) => !attempt.is_correct)
-        .map((attempt) => labelError(coachingErrors(attempt).primary)),
-    )];
-    const groups = [...new Set(scopedAttempts.map((attempt) =>
-      key === "mode"
-        ? modeLabel(sessionsById.get(attempt.session_id)?.mode)
-        : levelLabel(
-            attempt.level,
-            sessionsById.get(attempt.session_id)?.mode,
-          )))];
-
-    return groups.map((value) => {
-      const counts = Object.fromEntries(
-        categories.map((category) => [category, 0]),
-      ) as Record<string, number>;
-      scopedAttempts
-        .filter((attempt) => {
-          const group = key === "mode"
-            ? modeLabel(sessionsById.get(attempt.session_id)?.mode)
-            : levelLabel(
-                attempt.level,
-                sessionsById.get(attempt.session_id)?.mode,
-              );
-          return group === value && !attempt.is_correct;
-        })
-        .forEach((attempt) => {
-          const error = labelError(coachingErrors(attempt).primary);
-          counts[error] = (counts[error] ?? 0) + 1;
-        });
-      return { [key]: value, ...counts };
-    });
+  const recentWord = (attempt: ReportAttempt) => ({
+    word: attempt.target_word,
+    origin: attempt.word_catalog_entry?.origin || "Unknown",
+    date: formatDate(attempt.created_at),
+    correct: attempt.is_correct,
+  });
+  return {
+    byOrigin: countBy(byOrigin, "origin"),
+    byPos: countBy(byPos, "pos"),
+    byDifficulty: countBy(byDifficulty, "difficulty"),
+    byGradeBand: countBy(byGradeBand, "band"),
+    mostMissedOrigins: countRows(missedOrigins).map(
+      ({ label: origin, count: missed }) => ({ origin, incorrect: missed }),
+    ),
+    recentByOrigin: attempts.slice(0, 20).map(recentWord),
+    recentHard: attempts
+      .filter((attempt) =>
+        attempt.word_catalog_entry?.difficulty?.toLowerCase() === "hard")
+      .slice(0, 20)
+      .map(recentWord),
+    recentForeign: attempts
+      .filter((attempt) =>
+        sessionMap.get(attempt.session_id)?.mode === "foreign_origin")
+      .slice(0, 20)
+      .map(recentWord),
   };
+}
 
+export function buildSupportUsageSection(
+  source: ReportSource,
+  formatting: ReportFormatting = {},
+) {
+  const attempts = sortedAttempts(source);
+  const sessionMap = sessionsById(source);
+  const formatDate = displayDate(formatting);
   const supportAttempts = attempts.filter((attempt) =>
     attempt.definition_viewed
     || attempt.example_viewed
@@ -366,11 +502,107 @@ export function buildReportData(
     || attempt.part_of_speech_viewed
     || (attempt.repeat_word_count ?? 0) > 0
     || attempt.used_voice_input);
-  const mockSessions = source.sessions.filter(
-    (session) => session.mode === "mock_bee",
-  );
-  const completedMockSessions = mockSessions.filter(
-    (session) => session.status === "completed",
+
+  return {
+    definition: attempts.filter((attempt) => attempt.definition_viewed).length,
+    example: attempts.filter((attempt) => attempt.example_viewed).length,
+    origin: attempts.filter((attempt) => attempt.origin_viewed).length,
+    partOfSpeech: attempts.filter(
+      (attempt) => attempt.part_of_speech_viewed,
+    ).length,
+    repeat: attempts.filter(
+      (attempt) => (attempt.repeat_word_count ?? 0) > 0,
+    ).length,
+    voice: attempts.filter((attempt) => attempt.used_voice_input).length,
+    recentWithSupport: supportAttempts.slice(0, 20).map((attempt) => {
+      const session = sessionMap.get(attempt.session_id);
+      const supports = [
+        attempt.definition_viewed && "Definition",
+        attempt.example_viewed && "Example",
+        attempt.origin_viewed && "Origin",
+        attempt.part_of_speech_viewed && "Part of speech",
+        (attempt.repeat_word_count ?? 0) > 0 && "Repeat",
+        attempt.used_voice_input && "Voice input",
+      ].filter((value): value is string => Boolean(value));
+      return {
+        word: attempt.target_word,
+        date: formatDate(attempt.created_at),
+        supports,
+        mode: modeLabel(session?.mode),
+        level: levelLabel(attempt.level, session?.mode),
+        correct: attempt.is_correct,
+      };
+    }),
+    byMode: groupSupport(attempts, "mode", sessionMap),
+    byLevel: groupSupport(attempts, "level", sessionMap),
+  };
+}
+
+export function buildSessionsSection(
+  source: ReportSource,
+  formatting: ReportFormatting = {},
+) {
+  const attempts = sortedAttempts(source);
+  const attemptsBySession = new Map<string, ReportAttempt[]>();
+  for (const attempt of attempts) {
+    const rows = attemptsBySession.get(attempt.session_id) ?? [];
+    rows.push(attempt);
+    attemptsBySession.set(attempt.session_id, rows);
+  }
+  const formatDateTime = dateFormatter(formatting, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+
+  return source.sessions.map((session) => {
+    const sessionAttempts = attemptsBySession.get(session.id) ?? [];
+    const missed = sessionAttempts.filter((attempt) => !attempt.is_correct);
+    const supports = {
+      definition: sessionAttempts.filter((attempt) => attempt.definition_viewed).length,
+      example: sessionAttempts.filter((attempt) => attempt.example_viewed).length,
+      origin: sessionAttempts.filter((attempt) => attempt.origin_viewed).length,
+      partOfSpeech: sessionAttempts.filter(
+        (attempt) => attempt.part_of_speech_viewed,
+      ).length,
+      repeat: sessionAttempts.filter(
+        (attempt) => (attempt.repeat_word_count ?? 0) > 0,
+      ).length,
+      voice: sessionAttempts.filter((attempt) => attempt.used_voice_input).length,
+    };
+    const attempted = session.total_words_attempted ?? sessionAttempts.length;
+    const sessionCorrect = session.total_correct
+      ?? sessionAttempts.filter((attempt) => attempt.is_correct).length;
+    const details = session.mode === "mock_bee" ? mockBeeDetails(session) : null;
+    return {
+      id: session.id,
+      startedAt: formatDateTime.format(new Date(session.session_started_at)),
+      mode: modeLabel(session.mode),
+      level: details?.level ?? levelLabel(sessionAttempts[0]?.level, session.mode),
+      attempted,
+      correct: sessionCorrect,
+      incorrect: attempted - sessionCorrect,
+      accuracy: attempted ? Math.round((sessionCorrect / attempted) * 100) : 0,
+      durationMinutes: Math.round((session.duration_seconds ?? 0) / 60),
+      topMissCategories: countRows(
+        missed.reduce<Counts>((counts, attempt) => {
+          add(counts, labelError(coachingErrors(attempt).primary));
+          return counts;
+        }, {}),
+      ).slice(0, 2).map((item) => item.label),
+      supportsUsed: supports,
+      words: [],
+    };
+  });
+}
+
+export function buildMockBeeSection(
+  source: ReportSource,
+  formatting: ReportFormatting = {},
+) {
+  const completedMockSessions = source.sessions.filter(
+    (session) => session.mode === "mock_bee" && session.status === "completed",
   );
   const chronologicalMockSessions = [...completedMockSessions].sort(
     (a, b) =>
@@ -388,292 +620,98 @@ export function buildReportData(
     acc[level] = value;
     return acc;
   }, {});
-
-  const displayDate = (value: string) => formatDate.format(new Date(value));
-  const recentMiss = (attempt: ReportAttempt) => {
-    const errors = coachingErrors(attempt);
-    const session = sessionsById.get(attempt.session_id);
-    return {
-      target: attempt.target_word,
-      attempt: attempt.child_attempt,
-      primary: labelError(errors.primary),
-      secondary: errors.secondary.map(labelError),
-      date: displayDate(attempt.created_at),
-      mode: modeLabel(session?.mode),
-      level: levelLabel(attempt.level, session?.mode),
-    };
-  };
+  const formatDate = displayDate(formatting);
 
   return {
-    overview: {
-      totalAttempted: attempts.length,
-      accuracy: attempts.length ? Math.round((correct / attempts.length) * 100) : 0,
-      totalCorrect: correct,
-      totalIncorrect: incorrect,
-      sessionsCompleted: completedSessions.length,
-      avgAttemptsPerSession: completedSessions.length
-        ? Number((
-            completedSessions.reduce(
-              (total, session) =>
-                total + (
-                  session.total_words_attempted
-                  ?? attempts.filter(
-                    (attempt) => attempt.session_id === session.id,
-                  ).length
-                ),
-              0,
-            ) / completedSessions.length
-          ).toFixed(1))
+    roundsCompleted: completedMockSessions.length,
+    avgScore: completedMockSessions.length
+      ? Number((
+          completedMockSessions.reduce(
+            (total, session) => total + (session.total_correct ?? 0),
+            0,
+          ) / completedMockSessions.length
+        ).toFixed(1))
+      : 0,
+    accuracyByRound: chronologicalMockSessions.map((session, index) => ({
+      round: `R${index + 1}`,
+      accuracy: session.total_words_attempted
+        ? Math.round(
+            ((session.total_correct ?? 0) / session.total_words_attempted) * 100,
+          )
         : 0,
-      practiceTimeMinutes: Math.round(
-        completedSessions.reduce(
-          (total, session) => total + (session.duration_seconds ?? 0),
-          0,
-        ) / 60,
-      ),
-      accuracyTrend: trendRows.map((row) => ({
-        date: row.date,
-        accuracy: Math.round((row.correct / row.attempts) * 100),
-      })),
-      attemptsTrend: trendRows.map(({ date, attempts: count }) => ({
-        date,
-        attempts: count,
-      })),
-      byMode: countByFixedOrder(byMode, MODE_ORDER, "mode"),
-      byLevel: countByFixedOrder(byLevel, LEVEL_ORDER, "level"),
-    },
-    missAnalysis: {
-      primary: countRows(primary).map(({ label, count }) => ({
-        key: label,
-        label,
-        count,
-      })),
-      secondary: countRows(secondary).map(({ label, count }) => ({
-        key: label,
-        label,
-        count,
-      })),
-      byLevel: missBy("level"),
-      byMode: missBy("mode"),
-      recentIncorrect: attempts
-        .filter((attempt) => !attempt.is_correct)
-        .slice(0, 20)
-        .map(recentMiss),
-      recentMissedWords: [...new Map(
-        attempts
-          .filter((attempt) => !attempt.is_correct)
-          .map((attempt) => [attempt.target_word.toLowerCase(), attempt]),
-      ).values()].slice(0, 20).map(recentMiss),
-    },
-    wordKnowledge: {
-      byOrigin: countBy(byOrigin, "origin"),
-      byPos: countBy(byPos, "pos"),
-      byDifficulty: countBy(byDifficulty, "difficulty"),
-      byGradeBand: countBy(byGradeBand, "band"),
-      mostMissedOrigins: countRows(missedOrigins).map(
-        ({ label: origin, count: missed }) => ({ origin, incorrect: missed }),
-      ),
-      recentByOrigin: attempts.slice(0, 20).map((attempt) => ({
-        word: attempt.target_word,
-        origin: attempt.word_catalog_entry?.origin || "Unknown",
-        date: displayDate(attempt.created_at),
-        correct: attempt.is_correct,
-      })),
-      recentHard: attempts
-        .filter((attempt) =>
-          attempt.word_catalog_entry?.difficulty?.toLowerCase() === "hard")
-        .slice(0, 20)
-        .map((attempt) => ({
-          word: attempt.target_word,
-          origin: attempt.word_catalog_entry?.origin || "Unknown",
-          date: displayDate(attempt.created_at),
-          correct: attempt.is_correct,
-        })),
-      recentForeign: attempts
-        .filter((attempt) =>
-          sessionsById.get(attempt.session_id)?.mode === "foreign_origin")
-        .slice(0, 20)
-        .map((attempt) => ({
-          word: attempt.target_word,
-          origin: attempt.word_catalog_entry?.origin || "Unknown",
-          date: displayDate(attempt.created_at),
-          correct: attempt.is_correct,
-        })),
-    },
-    supportUsage: {
-      definition: attempts.filter((attempt) => attempt.definition_viewed).length,
-      example: attempts.filter((attempt) => attempt.example_viewed).length,
-      origin: attempts.filter((attempt) => attempt.origin_viewed).length,
-      partOfSpeech: attempts.filter(
-        (attempt) => attempt.part_of_speech_viewed,
-      ).length,
-      repeat: attempts.filter(
-        (attempt) => (attempt.repeat_word_count ?? 0) > 0,
-      ).length,
-      voice: attempts.filter((attempt) => attempt.used_voice_input).length,
-      recentWithSupport: supportAttempts.slice(0, 20).map((attempt) => {
-        const session = sessionsById.get(attempt.session_id);
-        const supports = [
-          attempt.definition_viewed && "Definition",
-          attempt.example_viewed && "Example",
-          attempt.origin_viewed && "Origin",
-          attempt.part_of_speech_viewed && "Part of speech",
-          (attempt.repeat_word_count ?? 0) > 0 && "Repeat",
-          attempt.used_voice_input && "Voice input",
-        ].filter((value): value is string => Boolean(value));
-        return {
-          word: attempt.target_word,
-          date: displayDate(attempt.created_at),
-          supports,
-          mode: modeLabel(session?.mode),
-          level: levelLabel(attempt.level, session?.mode),
-          correct: attempt.is_correct,
-        };
-      }),
-      byMode: groupSupport(attempts, "mode", sessionsById),
-      byLevel: groupSupport(attempts, "level", sessionsById),
-    },
-    sessions: source.sessions.map((session) => {
-      const sessionAttempts = attempts.filter(
-        (attempt) => attempt.session_id === session.id,
-      );
-      const missed = sessionAttempts.filter((attempt) => !attempt.is_correct);
-      const supports = {
-        definition: sessionAttempts.filter(
-          (attempt) => attempt.definition_viewed,
-        ).length,
-        example: sessionAttempts.filter(
-          (attempt) => attempt.example_viewed,
-        ).length,
-        origin: sessionAttempts.filter(
-          (attempt) => attempt.origin_viewed,
-        ).length,
-        partOfSpeech: sessionAttempts.filter(
-          (attempt) => attempt.part_of_speech_viewed,
-        ).length,
-        repeat: sessionAttempts.filter(
-          (attempt) => (attempt.repeat_word_count ?? 0) > 0,
-        ).length,
-        voice: sessionAttempts.filter(
-          (attempt) => attempt.used_voice_input,
-        ).length,
-      };
-      const attempted = session.total_words_attempted ?? sessionAttempts.length;
-      const sessionCorrect = session.total_correct
-        ?? sessionAttempts.filter((attempt) => attempt.is_correct).length;
-      const details = session.mode === "mock_bee"
-        ? mockBeeDetails(session)
-        : null;
+    })),
+    timeoutsByRound: chronologicalMockSessions.map((session, index) => ({
+      round: `R${index + 1}`,
+      timeouts: mockBeeDetails(session).timeouts,
+    })),
+    accuracyByLevel: Object.entries(mockLevels).map(([level, value]) => ({
+      level,
+      accuracy: value.total ? Math.round((value.correct / value.total) * 100) : 0,
+    })),
+    rounds: completedMockSessions.map((session) => {
+      const details = mockBeeDetails(session);
       return {
         id: session.id,
-        startedAt: formatDateTime.format(new Date(session.session_started_at)),
-        mode: modeLabel(session.mode),
-        level: details?.level
-          ?? levelLabel(sessionAttempts[0]?.level, session.mode),
-        attempted,
-        correct: sessionCorrect,
-        incorrect: attempted - sessionCorrect,
-        accuracy: attempted
-          ? Math.round((sessionCorrect / attempted) * 100)
-          : 0,
-        durationMinutes: Math.round((session.duration_seconds ?? 0) / 60),
-        topMissCategories: countRows(
-          missed.reduce<Counts>((counts, attempt) => {
-            add(counts, labelError(coachingErrors(attempt).primary));
-            return counts;
-          }, {}),
-        ).slice(0, 2).map((item) => item.label),
-        supportsUsed: supports,
-        words: sessionAttempts.map((attempt) => {
-          const errors = coachingErrors(attempt);
-          return {
-            target: attempt.target_word,
-            attempt: attempt.child_attempt,
-            correct: attempt.is_correct,
-            primaryError: labelError(errors.primary),
-            secondaryErrors: errors.secondary.map(labelError),
-            ...coachingDetails(attempt),
-          };
-        }),
+        date: formatDate(session.session_started_at),
+        level: details.level,
+        attempted: session.total_words_attempted ?? 0,
+        correct: session.total_correct ?? 0,
+        incorrect:
+          (session.total_words_attempted ?? 0) - (session.total_correct ?? 0),
+        timedOut: details.timeouts,
+        reviewCards: details.reviewCards,
       };
     }),
-    mockBee: {
-      roundsCompleted: completedMockSessions.length,
-      avgScore: completedMockSessions.length
-        ? Number((
-            completedMockSessions.reduce(
-              (total, session) => total + (session.total_correct ?? 0),
-              0,
-            ) / completedMockSessions.length
-          ).toFixed(1))
-        : 0,
-      accuracyByRound: chronologicalMockSessions.map((session, index) => ({
-        round: `R${index + 1}`,
-        accuracy: session.total_words_attempted
-          ? Math.round(
-              ((session.total_correct ?? 0) / session.total_words_attempted)
-              * 100,
-            )
-          : 0,
-      })),
-      timeoutsByRound: chronologicalMockSessions.map((session, index) => ({
-        round: `R${index + 1}`,
-        timeouts: mockBeeDetails(session).timeouts,
-      })),
-      accuracyByLevel: Object.entries(mockLevels).map(([level, value]) => ({
-        level,
-        accuracy: value.total
-          ? Math.round((value.correct / value.total) * 100)
-          : 0,
-      })),
-      rounds: completedMockSessions.map((session) => {
-        const details = mockBeeDetails(session);
-        return {
-          id: session.id,
-          date: displayDate(session.session_started_at),
-          level: details.level,
-          attempted: session.total_words_attempted ?? 0,
-          correct: session.total_correct ?? 0,
-          incorrect:
-            (session.total_words_attempted ?? 0) - (session.total_correct ?? 0),
-          timedOut: details.timeouts,
-          reviewCards: details.reviewCards,
-        };
-      }),
-    },
   };
 }
 
-export type ReportData = ReturnType<typeof buildReportData>;
+export type ReportData = {
+  overview: ReturnType<typeof buildOverviewSection>;
+  missAnalysis: ReturnType<typeof buildMissAnalysisSection>;
+  wordKnowledge: ReturnType<typeof buildWordKnowledgeSection>;
+  supportUsage: ReturnType<typeof buildSupportUsageSection>;
+  sessions: ReturnType<typeof buildSessionsSection>;
+  mockBee: ReturnType<typeof buildMockBeeSection>;
+};
 export type ReportSection = keyof ReportData;
-export type SessionWordDetails = ReportData["sessions"][number]["words"];
 
-/**
- * Build only the report section requested by the client. Session word details
- * are intentionally excluded here and are loaded from the drill-down endpoint.
- */
+export function buildReportData(
+  source: ReportSource,
+  formatting: ReportFormatting = {},
+): ReportData {
+  return {
+    overview: buildOverviewSection(source, formatting),
+    missAnalysis: buildMissAnalysisSection(source, formatting),
+    wordKnowledge: buildWordKnowledgeSection(source, formatting),
+    supportUsage: buildSupportUsageSection(source, formatting),
+    sessions: buildSessionsSection(source, formatting),
+    mockBee: buildMockBeeSection(source, formatting),
+  };
+}
+
+/** Build only the section requested by the client. */
 export function buildReportSection(
-  source: { sessions: ReportSession[]; attempts: ReportAttempt[] },
+  source: ReportSource,
   section: ReportSection,
   formatting: ReportFormatting = {},
 ): Partial<ReportData> {
-  const data = buildReportData(source, formatting);
-
-  if (section === "sessions") {
-    return {
-      sessions: data.sessions.map(({ words: _words, ...session }) => ({
-        ...session,
-        words: [],
-      })),
-    };
+  switch (section) {
+    case "overview":
+      return { overview: buildOverviewSection(source, formatting) };
+    case "missAnalysis":
+      return { missAnalysis: buildMissAnalysisSection(source, formatting) };
+    case "wordKnowledge":
+      return { wordKnowledge: buildWordKnowledgeSection(source, formatting) };
+    case "supportUsage":
+      return { supportUsage: buildSupportUsageSection(source, formatting) };
+    case "sessions":
+      return { sessions: buildSessionsSection(source, formatting) };
+    case "mockBee":
+      return { mockBee: buildMockBeeSection(source, formatting) };
   }
-
-  return { [section]: data[section] };
 }
 
-export function buildSessionWordDetails(
-  attempts: ReportAttempt[],
-): SessionWordDetails {
+export function buildSessionWordDetails(attempts: ReportAttempt[]) {
   return attempts.map((attempt) => {
     const errors = coachingErrors(attempt);
     return {
@@ -686,3 +724,5 @@ export function buildSessionWordDetails(
     };
   });
 }
+
+export type SessionWordDetails = ReturnType<typeof buildSessionWordDetails>;
