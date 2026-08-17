@@ -869,13 +869,24 @@ export class MockBeeService {
         turn.reviewCardStatus = "completed";
         turn.reviewError = undefined;
         session.updatedAt = new Date().toISOString();
-        await this.store!.save(session);
+        try {
+          await this.store!.save(session);
+        } catch (error) {
+          console.error("Failed to persist in-memory mock bee review card:", error);
+        }
       })
       .catch(async (error) => {
         turn.reviewCardStatus = "failed";
         turn.reviewError = error instanceof Error ? error.message : String(error);
         session.updatedAt = new Date().toISOString();
-        await this.store!.save(session);
+        try {
+          await this.store!.save(session);
+        } catch (persistenceError) {
+          console.error(
+            "Failed to persist in-memory mock bee review failure:",
+            persistenceError,
+          );
+        }
       });
   }
 
@@ -903,25 +914,36 @@ export class MockBeeService {
         turn.reviewError = undefined;
         session.updatedAt = new Date().toISOString();
 
-        await updateMockBeeSessionInDB(authToken, userId, session.id, {
-          session_state: buildMockBeeSessionState(session),
-        });
+        try {
+          await updateMockBeeSessionInDB(authToken, userId, session.id, {
+            session_state: buildMockBeeSessionState(session),
+          });
 
-        await updateWordAttemptCoachingResponseInDB(
-          authToken,
-          userId,
-          attemptId,
-          JSON.stringify(reviewCard),
-        );
+          await updateWordAttemptCoachingResponseInDB(
+            authToken,
+            userId,
+            attemptId,
+            JSON.stringify(reviewCard),
+          );
+        } catch (error) {
+          console.error("Failed to persist mock bee review card:", error);
+        }
       })
       .catch(async (error) => {
         turn.reviewCardStatus = "failed";
         turn.reviewError = error instanceof Error ? error.message : String(error);
         session.updatedAt = new Date().toISOString();
 
-        await updateMockBeeSessionInDB(authToken, userId, session.id, {
-          session_state: buildMockBeeSessionState(session),
-        });
+        try {
+          await updateMockBeeSessionInDB(authToken, userId, session.id, {
+            session_state: buildMockBeeSessionState(session),
+          });
+        } catch (persistenceError) {
+          console.error(
+            "Failed to persist mock bee review generation failure:",
+            persistenceError,
+          );
+        }
       });
   }
 }
