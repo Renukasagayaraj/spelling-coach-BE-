@@ -98,12 +98,15 @@ Weekly reports are disabled for every account until the account holder enables t
 Set these server-side environment variables before enabling the feature:
 
 - `SUPABASE_SERVICE_ROLE_KEY` — server-only Supabase service-role key; never expose this to the browser.
-- `RESEND_API_KEY` — API key for the sending domain in Resend.
-- `WEEKLY_EMAIL_FROM` — verified sender, for example `Spelling Scholar <updates@example.com>`.
+- `BREVO_API_KEY` — server-only Brevo API key used to send transactional emails.
+- `WEEKLY_EMAIL_FROM` — sender email address verified in Brevo, for example `updates@example.com`.
+- `WEEKLY_EMAIL_FROM_NAME` — optional sender display name; defaults to `Spelling Scholar`.
 - `CRON_SECRET` — a long random secret; Vercel uses it to authorize `/api/cron/weekly-report`.
 - `APP_BASE_URL` — public frontend URL used for the report link, for example `https://app.example.com`.
 
-Run `db/migration/V14__add_weekly_email_reports.sql` in the Supabase SQL editor before deploying. It adds the opt-in preference and an idempotent send log.
+Run `db/migration/V14__add_weekly_email_reports.sql` and
+`db/migration/V21__make_weekly_email_sends_retry_safe.sql` before deploying.
+They add the opt-in preference and duplicate-safe send tracking.
 
 ### Inactive practice sessions
 

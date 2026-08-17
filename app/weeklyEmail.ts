@@ -89,30 +89,40 @@ function emailHtml(recipient: EmailRecipient, summary: WeeklySummary, start: Dat
   </body></html>`;
 }
 
-async function sendWithResend(to: string, html: string): Promise<string | null> {
-  const apiKey = process.env.RESEND_API_KEY?.trim();
-  const from = process.env.WEEKLY_EMAIL_FROM?.trim();
-  if (!apiKey || !from) {
+async function sendWithBrevo(to: string, html: string): Promise<string | null> {
+  const apiKey = process.env.BREVO_API_KEY?.trim();
+  const senderEmail = process.env.WEEKLY_EMAIL_FROM?.trim();
+  const senderName = process.env.WEEKLY_EMAIL_FROM_NAME?.trim() || "Spelling Coach";
+  if (!apiKey || !senderEmail) {
     // No provider request can occur without this configuration, so retrying is
     // safe (and remains bounded by MAX_SEND_ATTEMPTS).
     throw new DefiniteEmailSendError(
-      "Weekly email requires RESEND_API_KEY and WEEKLY_EMAIL_FROM.",
+      "Weekly email requires BREVO_API_KEY and WEEKLY_EMAIL_FROM.",
     );
   }
-  const response = await fetch("https://api.resend.com/emails", {
+  const response = await fetch("https://api.brevo.com/v3/smtp/email", {
     method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ from, to: [to], subject: "Your weekly Spelling Scholar progress", html }),
+    headers: {
+      "api-key": apiKey,
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      sender: { email: senderEmail, name: senderName },
+      to: [{ email: to }],
+      subject: "Your weekly Spelling Scholar progress",
+      htmlContent: html,
+    }),
   });
   if (!response.ok) {
     const responseText = await response.text().catch(() => "Response body unavailable");
     throw new DefiniteEmailSendError(
-      `Resend email failed: ${response.status} ${responseText}`,
+      `Brevo email failed: ${response.status} ${responseText}`,
     );
   }
 
-  const result = await response.json().catch(() => null) as { id?: unknown } | null;
-  return typeof result?.id === "string" ? result.id : null;
+  const result = await response.json().catch(() => null) as { messageId?: unknown } | null;
+  return typeof result?.messageId === "string" ? result.messageId : null;
 }
 
 function errorMessage(error: unknown) {
@@ -345,7 +355,7 @@ export async function sendWeeklyEmailReports(now = new Date()) {
 
     let providerMessageId: string | null = null;
     try {
-      providerMessageId = await sendWithResend(
+      providerMessageId = await sendWithBrevo(
         recipient.email,
         emailHtml(recipient, summary, start, end),
       );
