@@ -2,6 +2,11 @@ import { createClient } from "@supabase/supabase-js";
 // @ts-ignore
 import ws from "ws";
 import { type WordEntry } from "./wordCatalog.js";
+import {
+  resultForAlreadyEndedSession,
+  type EndPracticeSessionResult,
+  type PracticeSessionStatus,
+} from "./sessionLifecycle.js";
 
 // Polyfill WebSocket support globally for Node.js < 22
 global.WebSocket = ws as any;
@@ -325,8 +330,6 @@ export type StartPracticeSessionResult =
       activeMode: string;
     };
 
-export type PracticeSessionStatus = "active" | "completed" | "abandoned";
-
 function calculateSessionDurationSeconds(sessionStartedAt: string, sessionEndedAt: string) {
   const startedAtMs = new Date(sessionStartedAt).getTime();
   const endedAtMs = new Date(sessionEndedAt).getTime();
@@ -635,10 +638,25 @@ export async function endPracticeSessionInDB(
   totalWordsAttempted: number,
   totalCorrect: number,
   durationSeconds: number,
-) {
+): Promise<EndPracticeSessionResult | null> {
   const userClient = getSupabaseUserClient(authToken);
 
-  const { error } = await userClient
+  const { data: existingSession, error: lookupError } = await userClient
+    .from("practice_sessions")
+    .select("status")
+    .eq("id", sessionId)
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (lookupError) throw lookupError;
+  if (!existingSession) return null;
+
+  const existingResult = resultForAlreadyEndedSession(
+    existingSession.status as PracticeSessionStatus,
+  );
+  if (existingResult) return existingResult;
+
+  const { data: completedSession, error: updateError } = await userClient
     .from("practice_sessions")
     .update({
       status: "completed",
@@ -649,11 +667,30 @@ export async function endPracticeSessionInDB(
     })
     .eq("id", sessionId)
     .eq("user_id", userId)
-    .eq("status", "active");
+    .eq("status", "active")
+    .select("status")
+    .maybeSingle();
 
-  if (error) {
-    throw error;
-  }
+  if (updateError) throw updateError;
+  if (completedSession) return "completed";
+
+  // The inactivity cron may have changed the status after our initial read.
+  const { data: currentSession, error: rereadError } = await userClient
+    .from("practice_sessions")
+    .select("status")
+    .eq("id", sessionId)
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (rereadError) throw rereadError;
+  if (!currentSession) return null;
+
+  const racedResult = resultForAlreadyEndedSession(
+    currentSession.status as PracticeSessionStatus,
+  );
+  if (racedResult) return racedResult;
+
+  throw new Error("Practice session could not be completed.");
 }
 
 /**

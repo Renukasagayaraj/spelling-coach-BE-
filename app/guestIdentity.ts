@@ -4,6 +4,11 @@ import {
   timingSafeEqual,
 } from "node:crypto";
 import { createClient } from "@supabase/supabase-js";
+import {
+  resultForAlreadyEndedSession,
+  type EndPracticeSessionResult,
+  type PracticeSessionStatus,
+} from "./sessionLifecycle.js";
 
 type GuestTokenPayload = {
   version: 1;
@@ -316,13 +321,14 @@ export async function endGuestPracticeSession(options: {
   token: string;
   sessionId: string;
   durationSeconds: number;
-}) {
+}): Promise<EndPracticeSessionResult> {
+  // check user identity and device token
   const { client, guestId, claimedByUserId } = await requireGuestIdentity(options.token);
   const ownerColumn = claimedByUserId ? "user_id" : "guest_id";
   const ownerId = claimedByUserId || guestId;
   const { data: session, error: sessionError } = await client
     .from("practice_sessions")
-    .select("id")
+    .select("id, status")
     .eq("id", options.sessionId)
     .eq(ownerColumn, ownerId)
     .eq("origin_guest_id", guestId)
@@ -331,7 +337,12 @@ export async function endGuestPracticeSession(options: {
   if (!session) {
     throw new GuestIdentityError("Guest session was not found.", 404, "GUEST_SESSION_NOT_FOUND");
   }
-  const { error } = await client
+  const existingResult = resultForAlreadyEndedSession(
+    session.status as PracticeSessionStatus,
+  );
+  if (existingResult) return existingResult;
+
+  const { data: completedSession, error } = await client
     .from("practice_sessions")
     .update({
       status: "completed",
@@ -341,8 +352,29 @@ export async function endGuestPracticeSession(options: {
     .eq("id", options.sessionId)
     .eq(ownerColumn, ownerId)
     .eq("origin_guest_id", guestId)
-    .eq("status", "active");
+    .eq("status", "active")
+    .select("status")
+    .maybeSingle();
   if (error) throw error;
+  if (completedSession) return "completed" as const;
+
+  // The inactivity cron may have abandoned the session after the first read.
+  const { data: currentSession, error: rereadError } = await client
+    .from("practice_sessions")
+    .select("status")
+    .eq("id", options.sessionId)
+    .eq(ownerColumn, ownerId)
+    .eq("origin_guest_id", guestId)
+    .maybeSingle();
+  if (rereadError) throw rereadError;
+  if (!currentSession) {
+    throw new GuestIdentityError("Guest session was not found.", 404, "GUEST_SESSION_NOT_FOUND");
+  }
+  const racedResult = resultForAlreadyEndedSession(
+    currentSession.status as PracticeSessionStatus,
+  );
+  if (racedResult) return racedResult;
+  throw new Error("Guest practice session could not be completed.");
 }
 
 export async function recordGuestStandardAttempt(options: {

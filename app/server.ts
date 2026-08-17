@@ -1070,19 +1070,19 @@ export default async function handler(
 
       const guestToken = guestTokenFromRequest(request);
       if (guestToken) {
-        await endGuestPracticeSession({
+        const result = await endGuestPracticeSession({
           token: guestToken,
           sessionId,
           durationSeconds: durationSeconds || 0,
         });
-        sendJson(response, 200, { success: true });
+        sendJson(response, 200, { success: true, result });
         return;
       }
 
       const user = await authenticateRequest(request);
       const authHeader = request.headers.authorization || "";
 
-      await endPracticeSessionInDB(
+       const result = await endPracticeSessionInDB(
         authHeader,
         user.id,
         sessionId,
@@ -1091,7 +1091,12 @@ export default async function handler(
         durationSeconds || 0,
       );
 
-      sendJson(response, 200, { success: true });
+      if (!result) {
+        sendJson(response, 404, { error: "Practice session not found." });
+        return;
+      }
+
+      sendJson(response, 200, { success: true, result });
       return;
     }
 
