@@ -1,5 +1,5 @@
 const DESCRIPTIVE_ORIGIN =
-  /^(?:unknown\b|brand\s*name\b|named\s+after\b|eponyms?\b|proper\s+(?:name|noun)\b|invented\s+by\b|mathematics\b|fictional\b|from\b|modern\s+scientific\b)/i;
+  /^(?:brand\s*name|named\s+after\b|eponyms?\b|proper\s+(?:name|noun)\b|invented\s+by\b|mathematics\b|fictional\b|from\b|modern\s+scientific\b)/i;
 
 const NON_LANGUAGE_LABEL =
   /^(?:abbreviation|acronym|blend|borrowed|brand\s*name|coined|compound|eponyms?|fictional|invented|loanword|misspelling|modern\s+scientific|place[-_\s]?name|proper[-_\s]?(?:name|noun)(?:[-_\s]?origin)?|shortening|unknown(?:\s+origin)?)$/i;
@@ -25,6 +25,44 @@ function languageCandidate(label: string): string | null {
   return candidate && !NON_LANGUAGE_LABEL.test(candidate) ? candidate : null;
 }
 
+function rawOriginCandidate(segment: string): string | null {
+  const trimmed = segment
+    .trim()
+    .replace(/^(?:possibly|perhaps)\s+/i, "")
+    .replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "")
+    .trim();
+  if (
+    !trimmed
+    || /^(?:short\s+for\b|abbreviation\b|acronym\b|coined\b)/i.test(trimmed)
+  ) {
+    return null;
+  }
+
+  const candidate = languageCandidate(trimmed);
+  if (!candidate) return null;
+
+  return candidate
+    .replace(/\s+(?:mythology|place\s+name|surname|slang)$/i, "")
+    .trim() || null;
+}
+
+function firstRawOriginCandidate(rawOrigin: string): string | null {
+  // Parenthetical text usually explains the first origin rather than replacing it.
+  const withoutParenthetical = rawOrigin.replace(/\s*\([^)]*\).*$/, "");
+  const segments = withoutParenthetical.split(
+    /\b(?:via|from|and)\b|[,+/]/i,
+  );
+
+  for (const segment of segments) {
+    // Quoted pieces such as "commercial" describe an abbreviation, not a language.
+    if (/^\s*["'].*["']\s*$/.test(segment)) continue;
+    const candidate = rawOriginCandidate(segment);
+    if (candidate) return candidate;
+  }
+
+  return null;
+}
+
 /**
  * Finds the first language mentioned in the raw etymology from its labels.
  * Labels such as "loanword" and "abbreviation" are metadata, not origins.
@@ -37,7 +75,8 @@ export function deriveMainOrigin(
   if (!rawOrigin || DESCRIPTIVE_ORIGIN.test(rawOrigin)) return "Unknown";
 
   const normalizedOrigin = normalizedWords(rawOrigin);
-  const matches = (originLabels ?? [])
+  const labels = originLabels ?? [];
+  const matches = labels
     .map((label, labelIndex) => {
       const candidate = languageCandidate(label);
       if (!candidate) return null;
@@ -50,6 +89,9 @@ export function deriveMainOrigin(
 
   if (matches[0]) return matches[0].candidate;
 
-  // A one-part raw origin (for example, "Latin") is already suitable for grouping.
-  return /[,+/()]|\b(?:via|from|and)\b/i.test(rawOrigin) ? "Unknown" : rawOrigin;
+  const isConstruction = labels.some((label) =>
+    /^(?:blend|compound)$/i.test(label.trim()));
+  if (isConstruction && rawOrigin.includes("+")) return "Unknown";
+
+  return firstRawOriginCandidate(rawOrigin) ?? "Unknown";
 }
