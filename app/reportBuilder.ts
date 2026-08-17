@@ -65,6 +65,7 @@ type ReportFormatting = {
 
 const LEVEL_ORDER = ["Level 1", "Level 2", "Level 3"] as const;
 const MODE_ORDER = ["Standard", "Custom", "Foreign Origin", "Mock Bee"] as const;
+const RECENT_MISSED_WORD_LIMIT = 20;
 
 function add(counts: Counts, key: string, amount = 1) {
   counts[key] = (counts[key] ?? 0) + amount;
@@ -412,6 +413,17 @@ export function buildMissAnalysisSection(
     };
   };
 
+  const recentMissedWords: ReportAttempt[] = [];
+  const seenMissedWords = new Set<string>();
+  for (const attempt of attempts) {
+    if (attempt.is_correct) continue;
+    const key = attempt.target_word.toLowerCase();
+    if (seenMissedWords.has(key)) continue;
+    seenMissedWords.add(key);
+    recentMissedWords.push(attempt);
+    if (recentMissedWords.length >= RECENT_MISSED_WORD_LIMIT) break;
+  }
+
   return {
     primary: countRows(primary).map(({ label, count }) => ({
       key: label,
@@ -429,11 +441,7 @@ export function buildMissAnalysisSection(
       .filter((attempt) => !attempt.is_correct)
       .slice(0, 20)
       .map(recentMiss),
-    recentMissedWords: [...new Map(
-      attempts
-        .filter((attempt) => !attempt.is_correct)
-        .map((attempt) => [attempt.target_word.toLowerCase(), attempt]),
-    ).values()].slice(0, 20).map(recentMiss),
+    recentMissedWords: recentMissedWords.map(recentMiss),
   };
 }
 
